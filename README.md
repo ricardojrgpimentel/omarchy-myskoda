@@ -10,19 +10,46 @@ The helper talks directly to the same private API used by the MySkoda app. It
 does not require Python or the `myskoda` package. Its only dependencies are
 `curl`, `jq`, `awk`, and `openssl`, which are present in Omarchy.
 
-## Install
+## Test on an Omarchy machine
 
-From this checkout on an Omarchy machine:
+The repository is currently private, so authenticate the GitHub CLI first and
+clone it locally:
 
 ```sh
+gh auth login
+gh repo clone ricardojrgpimentel/omarchy-myskoda
+cd omarchy-myskoda
+```
+
+Run the offline checks and validate the plugin before installing it:
+
+```sh
+tests/test.sh
+omarchy plugin validate .
 omarchy plugin add "$PWD" --enable
 ```
 
-After this repository becomes public, it can be installed directly from its
-Git URL. The widget defaults to the right side of the bar and can be moved with
-`omarchy bar move`.
+The widget defaults to the right side of the bar. Move it later with
+`omarchy bar move` or through the bar settings.
 
-## Sign in
+### Test the interface without an account
+
+Install the included synthetic Enyaq reading, then open the widget from the
+bar:
+
+```sh
+mkdir -p ~/.config/omarchy-myskoda
+cp tests/fixture.json ~/.config/omarchy-myskoda/fixture.json
+```
+
+The fixture prevents all vehicle API requests. Remove it before testing your
+real car:
+
+```sh
+rm ~/.config/omarchy-myskoda/fixture.json
+```
+
+### Connect your MySkoda account
 
 Run the helper from the installed plugin:
 
@@ -30,9 +57,45 @@ Run the helper from the installed plugin:
 ~/.config/omarchy/plugins/community.myskoda/bin/myskoda login
 ```
 
-It opens the official Volkswagen Group/MySkoda sign-in page using OAuth PKCE.
-After sign-in, the browser may be unable to open the final `myskoda://` address.
-Copy that complete address from the browser and paste it into the terminal.
+This opens the official Volkswagen Group/MySkoda sign-in page. Complete the
+login there. The browser may then say that it cannot open the final
+`myskoda://` address; copy that complete address from the address bar and paste
+it into the terminal prompt.
+
+Confirm that the account and live vehicle snapshot work before opening the
+widget:
+
+```sh
+helper=~/.config/omarchy/plugins/community.myskoda/bin/myskoda
+"$helper" vehicles | jq
+"$helper" car | jq
+```
+
+The first vehicle is selected by default. If `vehicles` returns more than one,
+open the widget settings and enter the desired VIN.
+
+### Remove or retry
+
+Remove the installed plugin without deleting its credentials:
+
+```sh
+omarchy plugin remove community.myskoda
+```
+
+Remove the local MySkoda tokens as well:
+
+```sh
+rm -rf ~/.config/omarchy-myskoda
+rm -rf ~/.cache/omarchy-myskoda
+```
+
+After this repository becomes public, installation directly from its Git URL
+will also be possible.
+
+## Authentication details
+
+The login command uses OAuth PKCE and the official Volkswagen Group identity
+page.
 
 Only the resulting rotating refresh token and short-lived access token are
 stored. Your email and password are entered only on the official identity page
@@ -43,15 +106,6 @@ If you already have a MySkoda OIDC refresh token, import it instead:
 ```sh
 ~/.config/omarchy/plugins/community.myskoda/bin/myskoda token
 ```
-
-Confirm the account and list its vehicles:
-
-```sh
-~/.config/omarchy/plugins/community.myskoda/bin/myskoda vehicles
-```
-
-Accounts with multiple vehicles can set a VIN in the widget settings. Empty
-selects the first vehicle.
 
 ## Security and privacy
 
@@ -73,18 +127,6 @@ Sign out locally with:
 
 ```sh
 ~/.config/omarchy/plugins/community.myskoda/bin/myskoda logout
-```
-
-## Offline UI testing
-
-Copy `tests/fixture.json` to
-`~/.config/omarchy-myskoda/fixture.json`. While that file exists, `car` returns
-it and makes no MySkoda request. Remove it to return to live data.
-
-Run the repository checks with:
-
-```sh
-tests/test.sh
 ```
 
 ## Status
