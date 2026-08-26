@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "community.myskoda",
+  "name": "MySkoda",
+  "version": "0.1.0",
+  "author": "Omarchy MySkoda contributors",
+  "description": "Your Skoda in the Omarchy bar: location, range, battery and charging status",
+  "license": "MIT",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "MySkoda",
+    "description": "Location, range, battery and charging status for your Skoda",
+    "category": "Home",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "vin": "",
+      "panelWidth": 380,
+      "mapZoom": 16,
+      "mapStyle": "Auto",
+      "pollMinutes": 10,
+      "showAddress": true,
+      "mapsUrl": "https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+    },
+    "schema": [
+      {
+        "key": "vin",
+        "type": "string",
+        "label": "VIN",
+        "defaultValue": "",
+        "description": "Select a vehicle when the account has more than one. Empty uses the first vehicle."
+      },
+      {
+        "key": "mapStyle",
+        "type": "enum",
+        "label": "Map",
+        "options": ["Auto", "Dark", "Light", "OpenStreetMap"],
+        "defaultValue": "Auto"
+      },
+      {
+        "key": "mapZoom",
+        "type": "integer",
+        "label": "Map zoom",
+        "min": 3,
+        "max": 19,
+        "step": 1,
+        "defaultValue": 16
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 320,
+        "max": 900,
+        "step": 20,
+        "defaultValue": 380
+      },
+      {
+        "key": "pollMinutes",
+        "type": "integer",
+        "label": "Refresh every",
+        "min": 5,
+        "max": 120,
+        "step": 5,
+        "defaultValue": 10,
+        "description": "Minutes between passive, read-only API refreshes."
+      },
+      {
+        "key": "showAddress",
+        "type": "boolean",
+        "label": "Show address",
+        "defaultValue": true,
+        "description": "Use the address returned by MySkoda. No separate geocoding request is made."
+      },
+      {
+        "key": "mapsUrl",
+        "type": "string",
+        "label": "Map click URL",
+        "defaultValue": "https://www.google.com/maps/search/?api=1&query={lat},{lon}",
+        "description": "{lat} and {lon} are replaced with the car coordinates."
+      }
+    ]
+  }
+}

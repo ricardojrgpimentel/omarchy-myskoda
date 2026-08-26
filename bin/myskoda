@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only MySkoda client using only curl, jq, awk and openssl.
+CLIENT_ID="7f045eee-7003-4379-9968-9355ed2adb06@apps_vw-dilab_com"
+REDIRECT_URI="myskoda://redirect/login/"
+API_BASE="https://mysmob.api.connect.skoda-auto.cz"
+IDENT_BASE="https://identity.vwgroup.io"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-myskoda"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-myskoda"
+REFRESH_FILE="$CONFIG_DIR/refresh-token"
+ACCESS_FILE="$CONFIG_DIR/access-token"
+CACHE_FILE="$CACHE_DIR/last-reading.json"
+FIXTURE_FILE="${MYSKODA_FIXTURE:-$CONFIG_DIR/fixture.json}"
+MAP_UA="omarchy-myskoda/0.1 (read-only desktop widget)"
+TILE_URL="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+VIN=""
+
+( umask 077; mkdir -p "$CONFIG_DIR" "$CACHE_DIR/tiles" )
+chmod 700 "$CONFIG_DIR" "$CACHE_DIR" "$CACHE_DIR/tiles" 2>/dev/null || true
+now() { date +%s; }
+write_private() { local p="$1" t="$1.part.$$"; ( umask 077; cat > "$t" ); chmod 600 "$t"; mv -f "$t" "$p"; }
+fail_json() { jq -cn --arg e "$1" --arg h "${2:-}" '{ok:false,error:$e}+if $h=="" then {} else {hint:$h} end'; exit 0; }
+need() { command -v "$1" >/dev/null 2>&1 || fail_json "missing dependency: $1"; }
+for dep in curl jq awk openssl; do need "$dep"; done
+urlencode() { jq -nr --arg v "$1" '$v|@uri'; }
+
+refresh_token() {
+  if [ -n "${MYSKODA_REFRESH_TOKEN:-}" ]; then printf '%s' "$MYSKODA_REFRESH_TOKEN"
+  elif [ -s "$REFRESH_FILE" ]; then sed -n '1{s/[[:space:]]*$//;p;q;}' "$REFRESH_FILE"; fi
+}
+
+refresh_access() {
+  local refresh response access rotated
+  refresh=$(refresh_token)
+  [ -n "$refresh" ] || fail_json "not signed in" "Run bin/myskoda login in a terminal"
+  response=$(curl -sS -f --max-time 45 -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg token "$refresh" '{token:$token}')" \
+    "$API_BASE/api/v1/authentication/refresh-token?tokenType=CONNECT" 2>/dev/null) \
+    || fail_json "sign-in expired" "Run bin/myskoda login again"
+  access=$(printf '%s' "$response" | jq -er '.accessToken') || fail_json "invalid token response"
+  rotated=$(printf '%s' "$response" | jq -er '.refreshToken') || fail_json "invalid token response"
+  printf '%s\n' "$access" | write_private "$ACCESS_FILE"
+  [ -n "${MYSKODA_REFRESH_TOKEN:-}" ] || printf '%s\n' "$rotated" | write_private "$REFRESH_FILE"
+}
+
+cmd_login() {
+  local verifier challenge nonce url callback code response access refresh
+  verifier=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')
+  challenge=$(printf '%s' "$verifier" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+  nonce=$(openssl rand -hex 8 | tr '[:lower:]' '[:upper:]')
+  url="$IDENT_BASE/oidc/v1/authorize?client_id=$(urlencode "$CLIENT_ID")"
+  url+="&nonce=$(urlencode "$nonce")&redirect_uri=$(urlencode "$REDIRECT_URI")&response_type=code"
+  url+="&scope=$(urlencode 'address badge birthdate cars driversLicense dealers email mileage mbb nationalIdentifier openid phone profession profile vin')"
+  url+="&code_challenge=$(urlencode "$challenge")&code_challenge_method=S256&prompt=login"
+  printf '%s\n\n' "Opening the official MySkoda sign-in page..." >&2
+  command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 || true
+  printf '%s\n' "If it did not open, visit:" "$url" "" >&2
+  printf '%s\n' "After sign-in, copy the full myskoda:// address from the browser." >&2
+  printf '%s' "Paste it here: " >&2; IFS= read -r callback
+  code=$(printf '%s' "$callback" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+  [ -n "$code" ] || fail_json "the callback did not contain an authorization code"
+  response=$(curl -sS -f --max-time 45 -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg code "$code" --arg redirect "$REDIRECT_URI" --arg verifier "$verifier" '{code:$code,redirectUri:$redirect,verifier:$verifier}')" \
+    "$API_BASE/api/v1/authentication/exchange-authorization-code?tokenType=CONNECT" 2>/dev/null) \
+    || fail_json "login exchange failed" "Try again; authorization codes can only be used once"
+  access=$(printf '%s' "$response" | jq -er '.accessToken') || fail_json "invalid login response"
+  refresh=$(printf '%s' "$response" | jq -er '.refreshToken') || fail_json "invalid login response"
+  printf '%s\n' "$access" | write_private "$ACCESS_FILE"
+  printf '%s\n' "$refresh" | write_private "$REFRESH_FILE"
+  cmd_vehicles_no_refresh
+}
+
+cmd_token() {
+  local supplied; printf '%s' "Paste MySkoda refresh token: " >&2; IFS= read -rs supplied; printf '\n' >&2
+  [ -n "$supplied" ] || fail_json "empty token"
+  printf '%s\n' "$supplied" | write_private "$REFRESH_FILE"; refresh_access; cmd_vehicles_no_refresh
+}
+cmd_logout() { rm -f -- "$REFRESH_FILE" "$ACCESS_FILE"; jq -cn '{ok:true,signedIn:false}'; }
+
+api_to_file() {
+  local path="$1" output="$2" token temporary="$2.part.$$"
+  token=$(sed -n '1p' "$ACCESS_FILE")
+  if curl -sS -f --max-time 45 -H "Authorization: Bearer $token" -o "$temporary" "$API_BASE/api$path" 2>/dev/null \
+      && jq -e . "$temporary" >/dev/null 2>&1; then mv -f "$temporary" "$output"
+  else printf '{}\n' > "$output"; rm -f -- "$temporary"; return 1; fi
+}
+
+garage_file() {
+  local output="$CACHE_DIR/garage.json"
+  api_to_file "/v2/garage?connectivityGenerations=MOD1&connectivityGenerations=MOD2&connectivityGenerations=MOD3&connectivityGenerations=MOD4" "$output" \
+    || fail_json "could not load the MySkoda garage"
+  printf '%s' "$output"
+}
+cmd_vehicles_no_refresh() { local garage; garage=$(garage_file); jq -c '{ok:true,vehicles:[.vehicles[]?|{vin,name,model:(.specification.model//null)}]}' "$garage"; }
+cmd_vehicles() { refresh_access; cmd_vehicles_no_refresh; }
+serve_cache() { [ -s "$CACHE_FILE" ] || fail_json "$1"; jq -c --arg e "$1" '.+{ok:true,stale:true,error:$e}' "$CACHE_FILE"; }
+
+cmd_car() {
+  if [ -s "$FIXTURE_FILE" ]; then jq -c '.+{ok:true}' "$FIXTURE_FILE"; return; fi
+  refresh_access
+  local garage vin work info charging range parking positions status maintenance failed="[]"
+  garage=$(garage_file); vin="$VIN"; [ -n "$vin" ] || vin=$(jq -r '.vehicles[0].vin//empty' "$garage")
+  [ -n "$vin" ] || fail_json "no vehicles found"
+  jq -e --arg vin "$vin" 'any(.vehicles[]?;.vin==$vin)' "$garage" >/dev/null || fail_json "configured VIN was not found"
+  work=$(mktemp -d "$CACHE_DIR/read.XXXXXX")
+  info="$work/info.json"; charging="$work/charging.json"; range="$work/range.json"; parking="$work/parking.json"
+  positions="$work/positions.json"; status="$work/status.json"; maintenance="$work/maintenance.json"
+  trap 'rm -rf -- "$work"' RETURN
+
+  api_to_file "/v2/garage/vehicles/$vin?connectivityGenerations=MOD1&connectivityGenerations=MOD2&connectivityGenerations=MOD3&connectivityGenerations=MOD4" "$info" & local a=$!
+  api_to_file "/v1/charging/$vin" "$charging" & local b=$!
+  api_to_file "/v2/vehicle-status/$vin/driving-range" "$range" & local c=$!
+  api_to_file "/v3/maps/positions/vehicles/$vin/parking" "$parking" & local d=$!
+  api_to_file "/v2/vehicle-status/$vin" "$status" & local e=$!
+  api_to_file "/v3/vehicle-maintenance/vehicles/$vin" "$maintenance" & local f=$!
+  wait "$a" || failed=$(printf '%s' "$failed"|jq -c '.+["info"]')
+  wait "$b" || failed=$(printf '%s' "$failed"|jq -c '.+["charging"]')
+  wait "$c" || failed=$(printf '%s' "$failed"|jq -c '.+["range"]')
+  wait "$d" || failed=$(printf '%s' "$failed"|jq -c '.+["parking"]')
+  wait "$e" || failed=$(printf '%s' "$failed"|jq -c '.+["status"]')
+  wait "$f" || failed=$(printf '%s' "$failed"|jq -c '.+["maintenance"]')
+  jq -e 'has("vin")' "$info" >/dev/null 2>&1 || { serve_cache "refresh failed"; return; }
+  if ! jq -e '.parkingPosition.gpsCoordinates' "$parking" >/dev/null 2>&1; then
+    api_to_file "/v1/maps/positions?vin=$vin" "$positions" || failed=$(printf '%s' "$failed"|jq -c '.+["positions"]')
+  else printf '{}\n' > "$positions"; fi
+
+  local reading
+  reading=$(jq -cn --argjson at "$(now)" --arg vin "$vin" --argjson errors "$failed" \
+    --slurpfile info "$info" --slurpfile charging "$charging" --slurpfile range "$range" \
+    --slurpfile parking "$parking" --slurpfile positions "$positions" --slurpfile status "$status" \
+    --slurpfile maintenance "$maintenance" '
+    ($info[0]//{}) as $i|($charging[0]//{}) as $c|($range[0]//{}) as $r|($parking[0]//{}) as $p|
+    ($positions[0]//{}) as $ps|($status[0]//{}) as $s|($maintenance[0]//{}) as $m|
+    ($r.primaryEngineRange//{}) as $primary|($r.secondaryEngineRange//{}) as $secondary|
+    ([$primary,$secondary]|map(select((.engineType//"")|ascii_downcase=="electric"))|first//{}) as $electric|
+    ([$primary,$secondary]|map(select((.engineType//"")|ascii_downcase!="electric" and .engineType!=null))|first//{}) as $fuel|
+    ($c.status.state//null) as $chargeState|
+    ([(if $s.overall.doors=="OPEN" then "one or more doors" else empty end),(if $s.overall.windows=="OPEN" then "one or more windows" else empty end),(if $s.detail.trunk=="OPEN" then "boot" else empty end),(if $s.detail.bonnet=="OPEN" then "bonnet" else empty end),(if $s.detail.sunroof=="OPEN" then "sunroof" else empty end)]) as $open|
+    ([$c.carCapturedTimestamp,$r.carCapturedTimestamp,$p.carCapturedTimestamp,$ps.carCapturedTimestamp,$s.carCapturedTimestamp,$m.carCapturedTimestamp]|map(select(.!=null))|sort|last//null) as $captured|
+    {ok:true,at:$at,captured_at:$captured,vin:$vin,name:($i.name//$i.specification.title//"My Skoda"),model:($i.specification.model//null),model_year:($i.specification.modelYear//null),software:($i.softwareVersion//null),license_plate:($i.licensePlate//null),
+     lat:($p.parkingPosition.gpsCoordinates.latitude//$ps.positions[0].gpsCoordinates.latitude//null),lon:($p.parkingPosition.gpsCoordinates.longitude//$ps.positions[0].gpsCoordinates.longitude//null),address:($p.parkingPosition.formattedAddress//([$ps.positions[0].address.street,$ps.positions[0].address.houseNumber,$ps.positions[0].address.city]|map(select(.!=null and .!=""))|join(", "))//null),
+     battery:($c.status.battery.stateOfChargeInPercent//$electric.currentSoCInPercent//null),fuel:($fuel.currentFuelLevelInPercent//null),range_km:($r.totalRangeInKm//(if $c.status.battery.remainingCruisingRangeInMeters==null then null else ($c.status.battery.remainingCruisingRangeInMeters/1000|round) end)),
+     charging:(($chargeState//"")|ascii_upcase=="CHARGING"),charging_state:$chargeState,charge_power_kw:($c.status.chargePowerInKw//null),charge_rate_kmh:($c.status.chargingRateInKilometersPerHour//null),remaining_minutes:($c.status.remainingTimeToFullyChargedInMinutes//null),target_charge:($c.settings.targetStateOfChargeInPercent//null),
+     locked:(($s.overall.locked//"")=="YES" or ($s.overall.locked//"")=="LOCKED"),lock_known:(($s.overall.locked//null)!=null and ($s.overall.locked//"")!="UNKNOWN"),doors:($s.overall.doors//null),windows:($s.overall.windows//null),lights:($s.overall.lights//null),trunk:($s.detail.trunk//null),bonnet:($s.detail.bonnet//null),open:$open,odometer_km:($m.maintenanceReport.mileageInKm//null),partial_errors:$errors}') \
+    || { serve_cache "could not understand the vehicle response"; return; }
+  printf '%s\n' "$reading" | write_private "$CACHE_FILE"; printf '%s\n' "$reading"
+}
+
+cmd_map() {
+  local lat="$1" lon="$2" zoom="$3" width="$4" height="$5" plan car_x car_y tiles="[]"
+  case "$lat$lon$zoom$width$height" in *[!0-9.\-]*) fail_json "map wants numbers";; esac
+  plan=$(awk -v lat="$lat" -v lon="$lon" -v z="$zoom" -v w="$width" -v h="$height" 'BEGIN{pi=3.14159265358979;s=256;n=2^z;r=lat*pi/180;fx=(lon+180)/360*n;fy=(1-log((sin(r)/cos(r))+(1/cos(r)))/pi)/2*n;cx=fx*s;cy=fy*s;l=cx-w/2;t=cy-h/2;x0=int(l/s);if(l<0&&l!=x0*s)x0--;y0=int(t/s);if(t<0&&t!=y0*s)y0--;x1=int((l+w-1)/s);if(l+w-1<0)x1--;y1=int((t+h-1)/s);if(t+h-1<0)y1--;printf "car %d %d\n",int(w/2+.5),int(h/2+.5);for(y=y0;y<=y1;y++)for(x=x0;x<=x1;x++){if(y<0||y>=n)continue;wx=x%n;if(wx<0)wx+=n;printf "tile %d %d %d %d\n",wx,y,int(x*s-l+.5),int(y*s-t+.5)}}')
+  car_x=$(printf '%s' "$plan"|awk '/^car/{print $2}'); car_y=$(printf '%s' "$plan"|awk '/^car/{print $3}')
+  while read -r _ tx ty px py; do [ -n "${tx:-}" ] || continue; local path; path=$(fetch_tile "$zoom" "$tx" "$ty") || continue; tiles=$(printf '%s' "$tiles"|jq -c --arg p "$path" --argjson x "$px" --argjson y "$py" '.+[{path:$p,x:$x,y:$y}]'); done < <(printf '%s' "$plan"|awk '/^tile/')
+  jq -cn --argjson tiles "$tiles" --argjson w "$width" --argjson h "$height" --argjson x "${car_x:-0}" --argjson y "${car_y:-0}" --argjson z "$zoom" '{ok:true,width:$w,height:$h,zoom:$z,tileSize:256,carX:$x,carY:$y,tiles:$tiles,attribution:"© OpenStreetMap contributors © CARTO"}'
+}
+fetch_tile() {
+  local z="$1" x="$2" y="$3" fp dir path url; fp=$(printf '%s' "$TILE_URL"|openssl dgst -sha256|awk '{print substr($NF,1,10)}'); dir="$CACHE_DIR/tiles/$fp/$z/$x"; path="$dir/$y.png"
+  [ -s "$path" ] && { printf '%s' "$path"; return; }; (umask 077; mkdir -p "$dir"); url="${TILE_URL//\{z\}/$z}"; url="${url//\{x\}/$x}"; url="${url//\{y\}/$y}"
+  if curl -sS -f --max-time 20 -A "$MAP_UA" -o "$path.part" "$url" 2>/dev/null && [ -s "$path.part" ]; then mv -f "$path.part" "$path"; printf '%s' "$path"; else rm -f -- "$path.part"; return 1; fi
+}
+
+usage() { cat <<'EOF'
+myskoda: read one Skoda through the MySkoda API.
+
+  login                       sign in in the official browser flow
+  token                       import an existing refresh token
+  logout                      remove local tokens
+  vehicles                    list account vehicles
+  car                         fetch the widget snapshot
+  map LAT LON ZOOM WIDTH HEIGHT
+
+Options: --vin VIN, --tile-url URL
+Set MYSKODA_FIXTURE or create ~/.config/omarchy-myskoda/fixture.json for offline UI testing.
+EOF
+}
+while [ $# -gt 0 ]; do case "$1" in --vin) VIN="${2:-}";shift 2;;--tile-url) TILE_URL="${2:-}";shift 2;;-h|--help)usage;exit 0;;*) command="$1";shift;break;;esac;done
+case "${command:-}" in login)[ $# -eq 0 ]||fail_json "login takes no arguments";cmd_login;;token)[ $# -eq 0 ]||fail_json "token takes no arguments";cmd_token;;logout)cmd_logout;;vehicles)cmd_vehicles;;car)cmd_car;;map)[ $# -eq 5 ]||fail_json "map wants LAT LON ZOOM WIDTH HEIGHT";cmd_map "$@";;*)usage >&2;fail_json "unknown command";;esac
