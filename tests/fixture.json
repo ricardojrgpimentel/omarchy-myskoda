@@ -12,6 +12,7 @@
   "address": "Praça do Comércio, Lisboa",
   "battery": 68,
   "fuel": null,
+  "powertrain": "electric",
   "range_km": 312,
   "charging": true,
   "charging_state": "CHARGING",

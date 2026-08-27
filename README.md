@@ -51,16 +51,22 @@ rm ~/.config/omarchy-myskoda/fixture.json
 
 ### Connect your MySkoda account
 
-Run the helper from the installed plugin:
+Open the MySkoda widget from the bar, choose **Sign in with MyŠkoda**, and
+complete the sign-in only in the official Volkswagen Group/MyŠkoda page. The
+plugin registers a local handler so the final `myskoda://` return address is
+normally completed automatically. If a browser cannot return automatically,
+copy that complete address from the browser and paste it into the widget, then
+choose **Finish sign-in**.
+
+The widget never asks for your email address or password. It only opens the
+official sign-in page and uses the resulting OAuth return address to finish the
+connection.
+
+The terminal flow remains available if needed:
 
 ```sh
 ~/.config/omarchy/plugins/community.myskoda/bin/myskoda login
 ```
-
-This opens the official Volkswagen Group/MySkoda sign-in page. Complete the
-login there. The browser may then say that it cannot open the final
-`myskoda://` address; copy that complete address from the address bar and paste
-it into the terminal prompt.
 
 Confirm that the account and live vehicle snapshot work before opening the
 widget:
