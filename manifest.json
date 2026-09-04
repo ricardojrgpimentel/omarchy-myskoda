@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "community.myskoda",
   "name": "MySkoda",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Omarchy MySkoda contributors",
   "description": "Your Skoda in the Omarchy bar: location, range, battery and charging status",
   "license": "MIT",
@@ -31,7 +31,7 @@
         "type": "string",
         "label": "VIN",
         "defaultValue": "",
-        "description": "Select a vehicle when the account has more than one. Empty uses the first vehicle."
+        "description": "Optional VIN override. When empty, the VIN entered while connecting is used."
       },
       {
         "key": "mapStyle",

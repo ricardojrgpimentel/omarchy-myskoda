@@ -56,7 +56,7 @@ Panel {
   property var mapPlan: null
   property string errorText: ""
   property string errorHint: ""
-  property string loginMessage: ""
+  property string setupMessage: ""
   property double now: Date.now()
 
   readonly property bool hasReading: reading !== null && reading.ok === true
@@ -72,6 +72,11 @@ Panel {
   readonly property real lon: hasPosition ? reading.lon : 0
   readonly property real readingAge:
     hasReading ? Math.max(0, now / 1000 - reading.at) : 0
+  readonly property bool keyExpiringSoon: {
+    if (!hasReading || !reading.api_key_expires_at) return false
+    var expiry = Date.parse(reading.api_key_expires_at)
+    return !isNaN(expiry) && expiry - root.now < 7 * 24 * 60 * 60 * 1000
+  }
 
   Timer {
     interval: 15000
@@ -96,11 +101,17 @@ Panel {
         root.errorText = data.ok === true ? (data.error || "") : (data.error || "unknown error")
         root.errorHint = data.hint || ""
         if (data.ok !== true) {
+          if (data.vin) vinField.text = data.vin
           // Do not keep showing a prior fixture or cached vehicle reading
           // after sign-out. This makes the account setup flow visible at once.
-          if (data.error === "not signed in" || data.error === "sign-in expired") {
+          if (data.error === "not configured"
+              || data.error === "Public API key required"
+              || data.error === "API key expired"
+              || data.error === "API key not authorized"
+              || data.error === "vehicle not found") {
             root.reading = null
             root.mapPlan = null
+            root.setupMessage = data.hint || data.error
           }
           return
         }
@@ -163,51 +174,37 @@ Panel {
   onLonChanged: planMap()
   onOpenedChanged: {
     if (!opened) return
-    refresh()
     planMap()
   }
 
   Process { id: browserProc }
 
   Process {
-    id: loginStartProc
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          var data = JSON.parse(text)
-          if (data.ok !== true || !data.url) {
-            root.loginMessage = data.error || "Could not start MySkoda sign-in."
-            return
-          }
-          root.loginMessage = "A temporary browser window was opened. It closes automatically after sign-in. If it cannot return here, paste the complete myskoda:// address below."
-          browserProc.command = data.browserProfile
-            ? ["chromium", "--user-data-dir=" + data.browserProfile, "--app=" + data.url]
-            : ["xdg-open", data.url]
-          browserProc.running = true
-        } catch (e) {
-          root.loginMessage = "Could not start MySkoda sign-in."
-        }
-      }
-    }
-  }
+    id: connectProc
+    stdinEnabled: true
+    property string pendingKey: ""
 
-  Process {
-    id: loginFinishProc
+    onStarted: {
+      write(pendingKey + "\n")
+      pendingKey = ""
+      apiKeyField.text = ""
+    }
+
     stdout: StdioCollector {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
           if (data.ok !== true) {
-            root.loginMessage = data.hint || data.error || "Could not finish MySkoda sign-in."
+            root.setupMessage = data.hint || data.error || "Could not connect MySkoda."
             return
           }
-          callbackField.text = ""
-          root.errorText = ""
-          root.errorHint = ""
-          root.loginMessage = "MySkoda account connected. Refreshing your vehicle…"
-          root.refresh()
+          root.reading = data
+          root.errorText = data.error || ""
+          root.errorHint = data.hint || ""
+          root.setupMessage = "MySkoda API key connected."
+          root.planMap()
         } catch (e) {
-          root.loginMessage = "Could not finish MySkoda sign-in."
+          root.setupMessage = "Could not connect MySkoda."
         }
       }
     }
@@ -219,30 +216,36 @@ Panel {
       onStreamFinished: {
         root.reading = null
         root.mapPlan = null
-        root.errorText = "not signed in"
+        root.errorText = "not configured"
         root.errorHint = ""
-        root.loginMessage = ""
+        root.setupMessage = ""
+        apiKeyField.text = ""
       }
     }
   }
 
-  function startLogin() {
-    if (loginStartProc.running || loginFinishProc.running) return
-    loginMessage = "Preparing the official MySkoda sign-in…"
-    loginStartProc.command = [root.script, "login-url"]
-    loginStartProc.running = true
+  function openKeySetup() {
+    if (browserProc.running) return
+    browserProc.command = ["xdg-open", "https://public.api.connect.skoda-auto.cz/docs"]
+    browserProc.running = true
   }
 
-  function finishLogin() {
-    var callback = callbackField.text.trim()
-    if (callback === "") {
-      loginMessage = "Paste the complete myskoda:// address from the browser."
+  function connect() {
+    var selectedVin = vinField.text.trim().toUpperCase()
+    var key = apiKeyField.text.trim()
+    if (!/^[A-Z0-9]{17}$/.test(selectedVin)) {
+      setupMessage = "Enter the 17-character VIN associated with the API key."
       return
     }
-    if (loginStartProc.running || loginFinishProc.running) return
-    loginMessage = "Connecting your account…"
-    loginFinishProc.command = [root.script, "complete-login", callback]
-    loginFinishProc.running = true
+    if (key === "") {
+      setupMessage = "Paste the API key created in the MySkoda app."
+      return
+    }
+    if (connectProc.running) return
+    setupMessage = "Checking the API key and vehicle…"
+    connectProc.pendingKey = key
+    connectProc.command = [root.script, "configure", selectedVin]
+    connectProc.running = true
   }
 
   function logout() {
@@ -273,6 +276,11 @@ Panel {
   function chargingState(value) {
     var words = String(value || "not charging").toLowerCase().replace(/_/g, " ")
     return words.charAt(0).toUpperCase() + words.slice(1)
+  }
+
+  function keyExpiry(value) {
+    if (!value) return "—"
+    return String(value).slice(0, 10)
   }
 
   readonly property string titleText: {
@@ -410,7 +418,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Sign in only in the official MyŠkoda page. When it finishes, the browser returns here automatically. If it cannot, copy the complete myskoda:// address and paste it below."
+          text: "Create an API key in the MyŠkoda app, select this vehicle, then paste the key below. The key is sent directly to the official public API."
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           font.family: root.fontFamily
@@ -421,24 +429,44 @@ Panel {
 
         Button {
           width: parent.width
-          text: loginStartProc.running ? "Opening official sign-in…" : "Sign in with MyŠkoda"
-          enabled: !loginStartProc.running && !loginFinishProc.running
+          text: "Open official API key setup"
+          enabled: !browserProc.running && !connectProc.running
           bordered: true
           foreground: root.foreground
           fontFamily: root.fontFamily
-          onClicked: root.startLogin()
+          onClicked: root.openKeySetup()
         }
 
         TextField {
-          id: callbackField
+          id: vinField
           width: parent.width
-          enabled: !loginStartProc.running && !loginFinishProc.running
-          placeholderText: "Paste myskoda://redirect/login/?code=…"
+          enabled: !connectProc.running
+          text: root.vin
+          placeholderText: "VIN — 17 characters"
+          foreground: root.foreground
+          font.family: root.fontFamily
+          maximumLength: 17
+          inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              apiKeyField.forceActiveFocus()
+              event.accepted = true
+            }
+          }
+        }
+
+        TextField {
+          id: apiKeyField
+          width: parent.width
+          enabled: !connectProc.running
+          placeholderText: "Paste MyŠkoda API key"
+          echoMode: TextInput.Password
+          inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
           foreground: root.foreground
           font.family: root.fontFamily
           Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-              root.finishLogin()
+              root.connect()
               event.accepted = true
             }
           }
@@ -446,23 +474,26 @@ Panel {
 
         Button {
           width: parent.width
-          text: loginFinishProc.running ? "Connecting…" : "Finish sign-in"
-          enabled: callbackField.text.trim() !== "" && !loginStartProc.running && !loginFinishProc.running
+          text: connectProc.running ? "Connecting…" : "Save and connect"
+          enabled: vinField.text.trim().length === 17
+            && apiKeyField.text.trim() !== "" && !connectProc.running
           bordered: true
           foreground: root.foreground
           fontFamily: root.fontFamily
-          onClicked: root.finishLogin()
+          onClicked: root.connect()
         }
 
         Text {
           width: parent.width
-          visible: root.loginMessage !== ""
-          text: root.loginMessage
+          visible: root.setupMessage !== ""
+          text: root.setupMessage
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          color: root.loginMessage.indexOf("Could not") === 0 || root.loginMessage.indexOf("Paste") === 0
+          color: root.setupMessage.indexOf("Could not") === 0
+              || root.setupMessage.indexOf("Paste") === 0
+              || root.setupMessage.indexOf("Enter") === 0
             ? Color.urgent : root.foreground
           opacity: 0.75
         }
@@ -647,12 +678,12 @@ Panel {
             ? root.reading.charge_rate_kmh + " km/h" : "—"
         }
         Detail {
-          label: "model"
-          value: root.hasReading && root.reading.model ? root.reading.model : "—"
+          label: "license plate"
+          value: root.hasReading && root.reading.license_plate ? root.reading.license_plate : "—"
         }
         Detail {
-          label: "software"
-          value: root.hasReading && root.reading.software ? root.reading.software : "—"
+          label: "key expires"
+          value: root.hasReading ? root.keyExpiry(root.reading.api_key_expires_at) : "—"
         }
       }
 
@@ -708,6 +739,20 @@ Panel {
         font.pixelSize: Style.font.caption
         color: root.errorText === "refresh failed" ? root.foreground : Color.urgent
         opacity: 0.75
+      }
+
+      Text {
+        width: parent.width
+        visible: root.keyExpiringSoon
+        text: "The MyŠkoda API key expires on " + root.keyExpiry(root.reading.api_key_expires_at)
+          + ". Renew it in the app, then sign out and connect the new key."
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        color: Color.urgent
+        opacity: 0.85
       }
     }
   }

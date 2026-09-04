@@ -1,0 +1,43 @@
+{
+  "vehicle": {
+    "vin": "TMBZZZAA123456789",
+    "name": "My Kodiaq",
+    "licensePlate": "22-CC-22",
+    "status": {
+      "overall": {
+        "doorsLocked": "OPENED",
+        "locked": "NO",
+        "doors": "OPEN",
+        "windows": "CLOSED",
+        "lights": "OFF",
+        "reliableLockStatus": "UNLOCKED"
+      },
+      "detail": {
+        "sunroof": "CLOSED",
+        "trunk": "OPEN",
+        "bonnet": "CLOSED"
+      }
+    },
+    "fuelStatus": {
+      "carType": "DIESEL",
+      "totalRangeInKm": 720,
+      "primaryEngineRange": {
+        "engineType": "DIESEL",
+        "currentFuelLevelInPercent": 63,
+        "remainingRangeInKm": 720
+      }
+    },
+    "odometer": {
+      "mileageInKm": 90500
+    },
+    "parkingPosition": {
+      "state": "IN_MOTION"
+    }
+  },
+  "errors": [
+    {
+      "type": "CHARGING_UNSUPPORTED",
+      "description": "Charging is not supported by this vehicle."
+    }
+  ]
+}

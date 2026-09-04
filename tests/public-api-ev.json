@@ -1,0 +1,59 @@
+{
+  "vehicle": {
+    "vin": "TMBJB9NY5RF999999",
+    "name": "My Enyaq",
+    "licensePlate": "00-AA-00",
+    "status": {
+      "overall": {
+        "doorsLocked": "YES",
+        "locked": "YES",
+        "doors": "CLOSED",
+        "windows": "CLOSED",
+        "lights": "OFF",
+        "reliableLockStatus": "LOCKED"
+      },
+      "detail": {
+        "sunroof": "CLOSED",
+        "trunk": "CLOSED",
+        "bonnet": "CLOSED"
+      },
+      "carCapturedTimestamp": "2026-09-04T13:55:00Z"
+    },
+    "odometer": {
+      "mileageInKm": 18432,
+      "carCapturedTimestamp": "2026-09-04T13:54:00Z"
+    },
+    "parkingPosition": {
+      "state": "PARKED",
+      "gpsCoordinates": {
+        "latitude": 38.7223,
+        "longitude": -9.1393
+      },
+      "formattedAddress": "Lisboa, Portugal"
+    },
+    "charging": {
+      "isVehicleInSavedLocation": true,
+      "status": {
+        "chargingRateInKilometersPerHour": 42.5,
+        "chargePowerInKw": 11,
+        "remainingTimeToFullyChargedInMinutes": 95,
+        "state": "CHARGING",
+        "chargeType": "AC",
+        "battery": {
+          "remainingCruisingRangeInMeters": 312000,
+          "stateOfChargeInPercent": 68
+        }
+      },
+      "settings": {
+        "targetStateOfChargeInPercent": 80
+      },
+      "carCapturedTimestamp": "2026-09-04T13:56:00Z"
+    }
+  },
+  "errors": [
+    {
+      "type": "FUEL_STATUS_UNSUPPORTED",
+      "description": "Fuel status is not supported by this vehicle."
+    }
+  ]
+}

@@ -1,14 +1,16 @@
 # MySkoda for Omarchy
 
-A read-only Omarchy bar widget for vehicles available through MySkoda. The bar
+A read-only Omarchy bar widget for vehicles available through the official
+[MyŠkoda Public API](https://public.api.connect.skoda-auto.cz/docs). The bar
 shows a car icon and highlights it while charging. Click it for the last known
 location, address, battery or fuel level, remaining range, charging status,
-lock state, odometer, software version, and any open doors, windows, boot, or
+lock state, odometer, license plate, and any open doors, windows, boot, or
 bonnet.
 
-The helper talks directly to the same private API used by the MySkoda app. It
-does not require Python or the `myskoda` package. Its only dependencies are
-`curl`, `jq`, `awk`, and `openssl`, which are present in Omarchy.
+The helper talks directly to the supported public API. It uses an API key
+created in the MyŠkoda app and does not imitate the mobile app login flow. Its
+only dependencies are `curl`, `jq`, `awk`, and `openssl`, which are present in
+Omarchy.
 
 ## Test on an Omarchy machine
 
@@ -49,36 +51,40 @@ real car:
 rm ~/.config/omarchy-myskoda/fixture.json
 ```
 
-### Connect your MySkoda account
+### Connect your MyŠkoda account
 
-Open the MySkoda widget from the bar, choose **Sign in with MyŠkoda**, and
-complete the sign-in only in the official Volkswagen Group/MyŠkoda page. The
-plugin registers a local handler so the final `myskoda://` return address is
-normally completed automatically. If a browser cannot return automatically,
-copy that complete address from the browser and paste it into the widget, then
-choose **Finish sign-in**.
+1. Open the widget and choose **Open official API key setup**.
+2. Follow the official instructions or scan their QR code with the phone that
+   has the MyŠkoda app.
+3. Create an API key and select the vehicle it may access.
+4. Paste the vehicle's 17-character VIN and the API key into the widget.
+5. Choose **Save and connect**.
 
-The widget never asks for your email address or password. It only opens the
-official sign-in page and uses the resulting OAuth return address to finish the
-connection.
+The public API does not provide a garage/list-vehicles endpoint, so the VIN is
+required even though the key is already bound to selected vehicles.
 
-The terminal flow remains available if needed:
+The terminal flow is also available:
 
 ```sh
-~/.config/omarchy/plugins/community.myskoda/bin/myskoda login
+~/.config/omarchy/plugins/community.myskoda/bin/myskoda connect YOUR_VIN
 ```
 
-Confirm that the account and live vehicle snapshot work before opening the
-widget:
+Confirm that the live vehicle snapshot works:
 
 ```sh
 helper=~/.config/omarchy/plugins/community.myskoda/bin/myskoda
-"$helper" vehicles | jq
 "$helper" car | jq
 ```
 
-The first vehicle is selected by default. If `vehicles` returns more than one,
-open the widget settings and enter the desired VIN.
+The VIN entered while connecting is the default. The optional VIN in the bar
+widget settings overrides it, which is useful when one key covers more than
+one vehicle.
+
+### Upgrading from version 0.1
+
+The old access and refresh tokens cannot be converted into a public API key.
+Create a new key in the MyŠkoda app and connect again. The obsolete files are
+ignored and are removed the next time you sign out through the widget.
 
 ### Remove or retry
 
@@ -88,7 +94,7 @@ Remove the installed plugin without deleting its credentials:
 omarchy plugin remove community.myskoda
 ```
 
-Remove the local MySkoda tokens as well:
+Remove the local MyŠkoda key, VIN, cache, and any legacy credentials as well:
 
 ```sh
 rm -rf ~/.config/omarchy-myskoda
@@ -100,34 +106,36 @@ will also be possible.
 
 ## Authentication details
 
-The login command uses OAuth PKCE and the official Volkswagen Group identity
-page.
+Every vehicle request sends the key in the `X-API-Key` header to
+`https://public.api.connect.skoda-auto.cz`. The widget passes a newly entered
+key to the helper over standard input, so it is not exposed in the process
+argument list.
 
-Only the resulting rotating refresh token and short-lived access token are
-stored. Your email and password are entered only on the official identity page
-and are never seen by this plugin.
+The API returns the key expiry in `X-API-Key-Expires-At`. When a key expires or
+does not cover the configured VIN, create or update it in the MyŠkoda app and
+paste it into the widget again.
 
-If you already have a MySkoda OIDC refresh token, import it instead:
+Set both `MYSKODA_API_KEY` and `MYSKODA_VIN` to keep credentials in an external
+secret manager instead of the plugin's local files.
 
-```sh
-~/.config/omarchy/plugins/community.myskoda/bin/myskoda token
-```
+## Security, privacy, and limits
 
-## Security and privacy
-
-Tokens are stored with mode `0600` under
-`~/.config/omarchy-myskoda/`. QML never reads credentials; it only executes the
-helper and consumes one sanitized JSON object. Set `MYSKODA_REFRESH_TOKEN` to
-keep the refresh token in an external secret manager instead.
+The API key is stored with mode `0600` under
+`~/.config/omarchy-myskoda/`. It is never returned to QML, printed in JSON, or
+passed to `curl` as a command-line argument.
 
 The map uses cached CARTO/OpenStreetMap tiles. It reveals the viewed map area
 to that tile provider, but not the car identity. The street address comes from
-MySkoda itself; the plugin does not send coordinates to a geocoder.
+MyŠkoda itself; the plugin does not send coordinates to a geocoder.
 
-The integration performs GET requests only after authentication. It contains
-no wake, lock/unlock, climate, horn, or charging controls. Unsupported endpoints
-are tolerated so EV, hybrid, and combustion vehicles can show the data their
-subscriptions provide.
+The integration performs GET requests only. It contains no wake, lock/unlock,
+climate, horn, or charging controls. Unsupported vehicle data is tolerated so
+EV, hybrid, and combustion vehicles can show the data they provide.
+
+The official API currently documents a limit of 20 requests per hour per VIN,
+with the response headers being authoritative. The widget uses one vehicle
+request per refresh, polls every 10 minutes by default, and keeps the last good
+reading during temporary failures or rate limiting.
 
 Sign out locally with:
 
@@ -138,15 +146,13 @@ Sign out locally with:
 ## Status
 
 This is an early, unofficial integration and is not affiliated with or endorsed
-by Škoda Auto. The MySkoda API is private and may change without notice. Initial
-live-account testing is still required on an Omarchy machine.
+by Škoda Auto. Live-account validation is still required on an Omarchy machine
+with a user-created Public API key.
 
 ## Credits
 
 The Omarchy widget structure and cached slippy-map approach were inspired by
-[`jankeesvw/omarchy-tesla`](https://github.com/jankeesvw/omarchy-tesla). API
-routes and authentication behavior were derived from the MIT-licensed
-[`skodaconnect/myskoda`](https://github.com/skodaconnect/myskoda) project.
+[`jankeesvw/omarchy-tesla`](https://github.com/jankeesvw/omarchy-tesla).
 
 ## License
 

@@ -1,0 +1,60 @@
+{
+  "vehicle": {
+    "vin": "TMBABCD1234567890",
+    "name": "My Superb",
+    "licensePlate": "11-BB-11",
+    "status": {
+      "overall": {
+        "doorsLocked": "NO",
+        "locked": "NO",
+        "doors": "CLOSED",
+        "windows": "OPEN",
+        "lights": "OFF",
+        "reliableLockStatus": "UNLOCKED"
+      },
+      "detail": {
+        "sunroof": "CLOSED",
+        "trunk": "CLOSED",
+        "bonnet": "CLOSED"
+      }
+    },
+    "fuelStatus": {
+      "carType": "HYBRID",
+      "totalRangeInKm": 610,
+      "primaryEngineRange": {
+        "engineType": "GASOLINE",
+        "currentFuelLevelInPercent": 74,
+        "remainingRangeInKm": 500
+      },
+      "secondaryEngineRange": {
+        "engineType": "ELECTRIC",
+        "currentSoCInPercent": 51,
+        "remainingRangeInKm": 110
+      }
+    },
+    "odometer": {
+      "mileageInKm": 42100
+    },
+    "parkingPosition": {
+      "state": "PARKED",
+      "gpsCoordinates": {
+        "latitude": 41.1496,
+        "longitude": -8.6109
+      }
+    },
+    "charging": {
+      "isVehicleInSavedLocation": false,
+      "status": {
+        "state": "READY_FOR_CHARGING",
+        "battery": {
+          "remainingCruisingRangeInMeters": 110000,
+          "stateOfChargeInPercent": 51
+        }
+      },
+      "settings": {
+        "targetStateOfChargeInPercent": 80
+      }
+    }
+  },
+  "errors": []
+}

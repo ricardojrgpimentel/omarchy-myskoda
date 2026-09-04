@@ -1,0 +1,7 @@
+HTTP/2 200
+content-type: application/json
+x-api-key-expires-at: 2026-12-31T23:59:59Z
+ratelimit-limit: 20
+ratelimit-remaining: 17
+ratelimit-reset: 900
+retry-after: 300

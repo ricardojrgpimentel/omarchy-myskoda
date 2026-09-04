@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Read-only MySkoda client using only curl, jq, awk and openssl.
-CLIENT_ID="7f045eee-7003-4379-9968-9355ed2adb06@apps_vw-dilab_com"
-REDIRECT_URI="myskoda://redirect/login/"
-API_BASE="https://mysmob.api.connect.skoda-auto.cz"
-IDENT_BASE="https://identity.vwgroup.io"
+# Read-only client for the official MySkoda Public API.
+API_BASE="${MYSKODA_API_BASE:-https://public.api.connect.skoda-auto.cz}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-myskoda"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-myskoda"
-REFRESH_FILE="$CONFIG_DIR/refresh-token"
-ACCESS_FILE="$CONFIG_DIR/access-token"
-LOGIN_FILE="$CONFIG_DIR/login-session.json"
-DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-HANDLER_FILE="$DATA_HOME/applications/community-myskoda-oauth.desktop"
+API_KEY_FILE="$CONFIG_DIR/api-key"
+VIN_FILE="$CONFIG_DIR/vin"
+LEGACY_REFRESH_FILE="$CONFIG_DIR/refresh-token"
+LEGACY_ACCESS_FILE="$CONFIG_DIR/access-token"
+LEGACY_LOGIN_FILE="$CONFIG_DIR/login-session.json"
 CACHE_FILE="$CACHE_DIR/last-reading.json"
 FIXTURE_FILE="${MYSKODA_FIXTURE:-$CONFIG_DIR/fixture.json}"
-MAP_UA="omarchy-myskoda/0.1 (read-only desktop widget)"
+MAP_UA="omarchy-myskoda/0.2 (read-only desktop widget)"
 TILE_URL="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
 VIN=""
 
@@ -23,195 +20,207 @@ VIN=""
 chmod 700 "$CONFIG_DIR" "$CACHE_DIR" "$CACHE_DIR/tiles" 2>/dev/null || true
 now() { date +%s; }
 write_private() { local p="$1" t="$1.part.$$"; ( umask 077; cat > "$t" ); chmod 600 "$t"; mv -f "$t" "$p"; }
-fail_json() { jq -cn --arg e "$1" --arg h "${2:-}" '{ok:false,error:$e}+if $h=="" then {} else {hint:$h} end'; exit 0; }
+fail_json() { jq -cn --arg e "$1" --arg h "${2:-}" --arg v "${3:-}" '{ok:false,error:$e}+if $h=="" then {} else {hint:$h} end+if $v=="" then {} else {vin:$v} end'; exit 0; }
 need() { command -v "$1" >/dev/null 2>&1 || fail_json "missing dependency: $1"; }
 for dep in curl jq awk openssl; do need "$dep"; done
-urlencode() { jq -nr --arg v "$1" '$v|@uri'; }
 
-install_redirect_handler() {
-  local script
-  command -v xdg-mime >/dev/null 2>&1 || return 0
-  script=$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")
-  mkdir -p "$DATA_HOME/applications"
-  ( umask 022
-    printf '%s\n' \
-      '[Desktop Entry]' \
-      'Type=Application' \
-      'Name=MySkoda sign-in return' \
-      "Exec=$script complete-login %u" \
-      'MimeType=x-scheme-handler/myskoda;' \
-      'NoDisplay=true' > "$HANDLER_FILE"
-  )
-  command -v update-desktop-database >/dev/null 2>&1 \
-    && update-desktop-database "$DATA_HOME/applications" >/dev/null 2>&1 || true
-  xdg-mime default community-myskoda-oauth.desktop x-scheme-handler/myskoda >/dev/null 2>&1 || true
+api_key() {
+  if [ -n "${MYSKODA_API_KEY:-}" ]; then printf '%s' "$MYSKODA_API_KEY"
+  elif [ -s "$API_KEY_FILE" ]; then sed -n '1{s/[[:space:]]*$//;p;q;}' "$API_KEY_FILE"; fi
 }
 
-refresh_token() {
-  if [ -n "${MYSKODA_REFRESH_TOKEN:-}" ]; then printf '%s' "$MYSKODA_REFRESH_TOKEN"
-  elif [ -s "$REFRESH_FILE" ]; then sed -n '1{s/[[:space:]]*$//;p;q;}' "$REFRESH_FILE"; fi
+configured_vin() {
+  if [ -n "$VIN" ]; then printf '%s' "$VIN"
+  elif [ -n "${MYSKODA_VIN:-}" ]; then printf '%s' "$MYSKODA_VIN"
+  elif [ -s "$VIN_FILE" ]; then sed -n '1{s/[[:space:]]*$//;p;q;}' "$VIN_FILE"; fi
 }
 
-refresh_access() {
-  local refresh response access rotated
-  refresh=$(refresh_token)
-  [ -n "$refresh" ] || fail_json "not signed in" "Run bin/myskoda login in a terminal"
-  response=$(curl -sS -f --max-time 45 -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg token "$refresh" '{token:$token}')" \
-    "$API_BASE/api/v1/authentication/refresh-token?tokenType=CONNECT" 2>/dev/null) \
-    || fail_json "sign-in expired" "Run bin/myskoda login again"
-  access=$(printf '%s' "$response" | jq -er '.accessToken') || fail_json "invalid token response"
-  rotated=$(printf '%s' "$response" | jq -er '.refreshToken') || fail_json "invalid token response"
-  printf '%s\n' "$access" | write_private "$ACCESS_FILE"
-  [ -n "${MYSKODA_REFRESH_TOKEN:-}" ] || printf '%s\n' "$rotated" | write_private "$REFRESH_FILE"
+validate_vin() {
+  [[ $1 =~ ^[[:alnum:]]{17}$ ]] \
+    || fail_json "invalid VIN" "Enter the 17-character VIN associated with the API key."
 }
 
-cmd_login_url() {
-  local verifier challenge nonce url browser_profile=""
-  [[ ${MYSKODA_NO_REDIRECT_HANDLER:-} == 1 ]] || install_redirect_handler
-  verifier=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')
-  challenge=$(printf '%s' "$verifier" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
-  nonce=$(openssl rand -hex 8 | tr '[:lower:]' '[:upper:]')
-  url="$IDENT_BASE/oidc/v1/authorize?client_id=$(urlencode "$CLIENT_ID")"
-  url+="&nonce=$(urlencode "$nonce")&redirect_uri=$(urlencode "$REDIRECT_URI")&response_type=code"
-  url+="&scope=$(urlencode 'address badge birthdate cars driversLicense dealers email mileage mbb nationalIdentifier openid phone profession profile vin')"
-  url+="&code_challenge=$(urlencode "$challenge")&code_challenge_method=S256&prompt=login"
-  if [[ ${MYSKODA_NO_REDIRECT_HANDLER:-} != 1 ]] && command -v chromium >/dev/null 2>&1; then
-    browser_profile=$(mktemp -d "$CACHE_DIR/oauth-browser.XXXXXX")
+header_value() {
+  local wanted="$1" file="$2"
+  awk -v wanted="$wanted" '
+    index($0, ":") > 0 {
+      name=substr($0, 1, index($0, ":")-1)
+      if (tolower(name)==tolower(wanted)) {
+        value=substr($0, index($0, ":")+1)
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]\r]+$/, "", value)
+      }
+    }
+    END { print value }
+  ' "$file"
+}
+
+request_vehicle() {
+  local vin="$1" key="$2" body="$3" headers="$4" temporary="$3.part.$$" status
+  if [ -n "${MYSKODA_API_FIXTURE:-}" ]; then
+    cp "$MYSKODA_API_FIXTURE" "$body"
+    if [ -n "${MYSKODA_API_HEADERS_FIXTURE:-}" ]; then cp "$MYSKODA_API_HEADERS_FIXTURE" "$headers"
+    else : > "$headers"; fi
+    printf '%s' "${MYSKODA_API_STATUS:-200}"
+    return
   fi
-  jq -cn --arg verifier "$verifier" --arg profile "$browser_profile" --argjson started_at "$(now)" \
-    '{verifier:$verifier,browser_profile:$profile,started_at:$started_at}' | write_private "$LOGIN_FILE"
-  jq -cn --arg url "$url" --arg profile "$browser_profile" \
-    '{ok:true,url:$url,browserProfile:$profile}'
+  if ! status=$(printf 'X-API-Key: %s\n' "$key" | curl -sS --max-time 45 \
+      --header @- --header 'Accept: application/json' --dump-header "$headers" \
+      --output "$temporary" --write-out '%{http_code}' \
+      "$API_BASE/api/v1/vehicles/$vin?include=info,status,fuelStatus,odometer,parkingPosition,charging" 2>/dev/null); then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  mv -f "$temporary" "$body"
+  printf '%s' "$status"
 }
 
-close_login_browser() {
-  local profile="$1" pid
-  [[ $profile == "$CACHE_DIR"/oauth-browser.* && -d $profile ]] || return 0
-  while IFS= read -r pid; do kill "$pid" 2>/dev/null || true; done \
-    < <(pgrep -f -- "--user-data-dir=$profile" 2>/dev/null || true)
-  rm -rf -- "$profile"
+serve_cache() {
+  local error="$1" hint="${2:-}" vin="${3:-}" retry_after="${4:-}"
+  if [ -s "$CACHE_FILE" ] && { [ -z "$vin" ] || jq -e --arg vin "$vin" '.vin==$vin' "$CACHE_FILE" >/dev/null 2>&1; }; then
+    jq -c --arg e "$error" --arg h "$hint" --arg retry "$retry_after" '
+      .+{ok:true,stale:true,error:$e}
+      +if $h=="" then {} else {hint:$h} end
+      +if $retry=="" then {} else {retry_after:(try ($retry|tonumber) catch $retry)} end
+    ' "$CACHE_FILE"
+  else fail_json "$error" "$hint" "$vin"; fi
 }
 
-cmd_complete_login() {
-  local callback="$1" verifier browser_profile code response access refresh vehicles
-  [[ $callback == "$REDIRECT_URI"* ]] \
-    || fail_json "invalid login return address" "Paste the complete myskoda:// address shown after sign-in."
-  verifier=$(jq -r '.verifier // empty' "$LOGIN_FILE" 2>/dev/null) \
-    || fail_json "login session expired" "Start the MySkoda sign-in again."
-  [ -n "$verifier" ] || fail_json "login session expired" "Start the MySkoda sign-in again."
-  browser_profile=$(jq -r '.browser_profile // empty' "$LOGIN_FILE" 2>/dev/null || true)
-  code=$(printf '%s' "$callback" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
-  [ -n "$code" ] || fail_json "the callback did not contain an authorization code"
-  # The authorization code is single-use. A failed exchange needs a fresh
-  # login session instead of leaving a reusable verifier on disk.
-  rm -f -- "$LOGIN_FILE"
-  response=$(curl -sS -f --max-time 45 -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg code "$code" --arg redirect "$REDIRECT_URI" --arg verifier "$verifier" '{code:$code,redirectUri:$redirect,verifier:$verifier}')" \
-    "$API_BASE/api/v1/authentication/exchange-authorization-code?tokenType=CONNECT" 2>/dev/null) \
-    || fail_json "login exchange failed" "Try again; authorization codes can only be used once"
-  access=$(printf '%s' "$response" | jq -er '.accessToken') || fail_json "invalid login response"
-  refresh=$(printf '%s' "$response" | jq -er '.refreshToken') || fail_json "invalid login response"
-  printf '%s\n' "$access" | write_private "$ACCESS_FILE"
-  printf '%s\n' "$refresh" | write_private "$REFRESH_FILE"
-  close_login_browser "$browser_profile"
-  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
-  vehicles=$(cmd_vehicles_no_refresh)
-  printf '%s\n' "$vehicles"
+normalise_vehicle() {
+  local body="$1" headers="$2" vin="$3" expires remaining limit reset
+  expires=$(header_value X-API-Key-Expires-At "$headers")
+  remaining=$(header_value RateLimit-Remaining "$headers")
+  limit=$(header_value RateLimit-Limit "$headers")
+  reset=$(header_value RateLimit-Reset "$headers")
+  jq -c --argjson at "$(now)" --arg requested_vin "$vin" --arg expires "$expires" \
+    --arg remaining "$remaining" --arg limit "$limit" --arg reset "$reset" '
+    .vehicle as $v | (.errors//[]) as $errors |
+    ($v.status//{}) as $s | ($v.fuelStatus//{}) as $fs | ($v.charging//{}) as $c |
+    ($v.parkingPosition//{}) as $p | ($v.odometer//{}) as $o |
+    ([$fs.primaryEngineRange,$fs.secondaryEngineRange]
+      | map(objects | select(((.engineType//"")|ascii_upcase)=="ELECTRIC")) | first//{}) as $electric |
+    ([$fs.primaryEngineRange,$fs.secondaryEngineRange]
+      | map(objects | select((((.engineType//"")|ascii_upcase)!="ELECTRIC") and (.engineType!=null))) | first//{}) as $fuel |
+    ([$errors[]?.type] | map(select(.!=null))) as $errorTypes |
+    (($v.charging!=null) or (($fs.carType//"")=="HYBRID") or any($errorTypes[]?;.=="FUEL_STATUS_UNSUPPORTED")) as $hasElectric |
+    (($v.fuelStatus!=null) or any($errorTypes[]?;.=="CHARGING_UNSUPPORTED")) as $hasCombustion |
+    (if $hasElectric and $hasCombustion then "hybrid" elif $hasElectric then "electric" elif $hasCombustion then "combustion" else "unknown" end) as $powertrain |
+    ($c.status.state//null) as $chargeState |
+    ([(if $s.overall.doors=="OPEN" then "one or more doors" else empty end),
+      (if $s.overall.windows=="OPEN" then "one or more windows" else empty end),
+      (if $s.detail.trunk=="OPEN" then "boot" else empty end),
+      (if $s.detail.bonnet=="OPEN" then "bonnet" else empty end),
+      (if $s.detail.sunroof=="OPEN" then "sunroof" else empty end)]) as $open |
+    ([$s.carCapturedTimestamp,$fs.carCapturedTimestamp,$c.carCapturedTimestamp,
+      $p.carCapturedTimestamp,$o.carCapturedTimestamp]|map(select(.!=null))|sort|last//null) as $captured |
+    ($errors|map(select((((.type//"")|endswith("_UNSUPPORTED"))|not)))) as $warnings |
+    {ok:true,at:$at,captured_at:$captured,vin:($v.vin//$requested_vin),
+     name:($v.name//"My Skoda"),model:null,model_year:null,software:null,
+     license_plate:($v.licensePlate//null),
+     lat:($p.gpsCoordinates.latitude//null),lon:($p.gpsCoordinates.longitude//null),
+     address:($p.formattedAddress//null),
+     battery:($c.status.battery.stateOfChargeInPercent//$electric.currentSoCInPercent//null),
+     fuel:($fuel.currentFuelLevelInPercent//null),
+     range_km:($fs.totalRangeInKm//(if $c.status.battery.remainingCruisingRangeInMeters==null then null else ($c.status.battery.remainingCruisingRangeInMeters/1000|round) end)),
+     powertrain:$powertrain,
+     charging:(($chargeState//"")|ascii_upcase=="CHARGING"),charging_state:$chargeState,
+     charge_power_kw:($c.status.chargePowerInKw//null),
+     charge_rate_kmh:($c.status.chargingRateInKilometersPerHour//null),
+     remaining_minutes:($c.status.remainingTimeToFullyChargedInMinutes//null),
+     target_charge:($c.settings.targetStateOfChargeInPercent//null),
+     locked:(if ($s.overall.reliableLockStatus//"")=="LOCKED" then true
+             elif ($s.overall.reliableLockStatus//"")=="UNLOCKED" then false
+             else (($s.overall.locked//"")=="YES") end),
+     lock_known:((($s.overall.reliableLockStatus//"")=="LOCKED") or (($s.overall.reliableLockStatus//"")=="UNLOCKED") or (($s.overall.locked//"")=="YES") or (($s.overall.locked//"")=="NO")),
+     doors:($s.overall.doors//null),windows:($s.overall.windows//null),lights:($s.overall.lights//null),
+     trunk:($s.detail.trunk//null),bonnet:($s.detail.bonnet//null),open:$open,
+     odometer_km:($o.mileageInKm//null),partial_errors:[$errors[]?.type],
+     api_key_expires_at:(if $expires=="" then null else $expires end),
+     rate_limit_remaining:(try ($remaining|tonumber) catch null),
+     rate_limit_limit:(try ($limit|tonumber) catch null),
+     rate_limit_reset:(try ($reset|tonumber) catch null),
+     error:(if ($warnings|length)>0 then "some vehicle data is unavailable" else null end),
+     hint:(if ($warnings|length)>0 then ($warnings|map(.description//.type)|join(" ")) else null end)}
+  ' "$body"
 }
 
-cmd_login() {
-  local started url callback
-  started=$(MYSKODA_NO_REDIRECT_HANDLER=1 cmd_login_url)
-  url=$(printf '%s' "$started" | jq -r '.url // empty')
-  [ -n "$url" ] || fail_json "could not start sign-in"
-  printf '%s\n\n' "Opening the official MySkoda sign-in page..." >&2
-  command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 || true
-  printf '%s\n' "If it did not open, visit:" "$url" "" >&2
-  printf '%s\n' "After sign-in, copy the full myskoda:// address from the browser." >&2
-  printf '%s' "Paste it here: " >&2; IFS= read -r callback
-  cmd_complete_login "$callback"
+fetch_vehicle() {
+  local vin="$1" key="$2" work body headers status problem_type detail retry reading
+  work=$(mktemp -d "$CACHE_DIR/read.XXXXXX")
+  body="$work/vehicle.json"; headers="$work/headers.txt"
+  if ! status=$(request_vehicle "$vin" "$key" "$body" "$headers"); then
+    rm -rf -- "$work"
+    serve_cache "refresh failed" "Could not reach the MySkoda Public API." "$vin"
+    return
+  fi
+  if [ "$status" = 200 ]; then
+    if ! jq -e '.vehicle.vin' "$body" >/dev/null 2>&1; then
+      rm -rf -- "$work"
+      serve_cache "invalid vehicle response" "The public API returned an unexpected response." "$vin"
+      return
+    fi
+    if ! reading=$(normalise_vehicle "$body" "$headers" "$vin"); then
+      rm -rf -- "$work"
+      serve_cache "could not understand the vehicle response" "The public API response format may have changed." "$vin"
+      return
+    fi
+    printf '%s\n' "$reading" | write_private "$CACHE_FILE"
+    rm -rf -- "$work"
+    printf '%s\n' "$reading"
+    return
+  fi
+  problem_type=$(jq -r '.type//empty' "$body" 2>/dev/null || true)
+  detail=$(jq -r '.detail//empty' "$body" 2>/dev/null || true)
+  retry=$(header_value Retry-After "$headers")
+  rm -rf -- "$work"
+  case "$status" in
+    401) fail_json "API key expired" "Create or update the key in the MySkoda app." "$vin";;
+    403) fail_json "API key not authorized" "Check that this VIN was selected when the key was created." "$vin";;
+    404) fail_json "vehicle not found" "Check the configured VIN." "$vin";;
+    429) serve_cache "rate limit reached" "${detail:-Wait before refreshing again.}" "$vin" "$retry";;
+    500|503|504) serve_cache "refresh failed" "${detail:-The MySkoda Public API is temporarily unavailable.}" "$vin";;
+    *) fail_json "MySkoda API request failed" "${detail:-HTTP $status${problem_type:+: $problem_type}}";;
+  esac
 }
 
-cmd_token() {
-  local supplied; printf '%s' "Paste MySkoda refresh token: " >&2; IFS= read -rs supplied; printf '\n' >&2
-  [ -n "$supplied" ] || fail_json "empty token"
-  printf '%s\n' "$supplied" | write_private "$REFRESH_FILE"; refresh_access; cmd_vehicles_no_refresh
-}
-cmd_logout() { rm -f -- "$REFRESH_FILE" "$ACCESS_FILE" "$LOGIN_FILE"; jq -cn '{ok:true,signedIn:false}'; }
-
-api_to_file() {
-  local path="$1" output="$2" token temporary="$2.part.$$"
-  token=$(sed -n '1p' "$ACCESS_FILE")
-  if curl -sS -f --max-time 45 -H "Authorization: Bearer $token" -o "$temporary" "$API_BASE/api$path" 2>/dev/null \
-      && jq -e . "$temporary" >/dev/null 2>&1; then mv -f "$temporary" "$output"
-  else printf '{}\n' > "$output"; rm -f -- "$temporary"; return 1; fi
+cmd_configure() {
+  local vin="$1" supplied
+  vin=$(printf '%s' "$vin" | tr '[:lower:]' '[:upper:]')
+  validate_vin "$vin"
+  IFS= read -r supplied || true
+  supplied=${supplied%$'\r'}
+  [ -n "$supplied" ] || fail_json "empty API key" "Create an API key in the MySkoda app and paste it here."
+  printf '%s\n' "$supplied" | write_private "$API_KEY_FILE"
+  printf '%s\n' "$vin" | write_private "$VIN_FILE"
+  fetch_vehicle "$vin" "$supplied"
 }
 
-garage_file() {
-  local output="$CACHE_DIR/garage.json"
-  api_to_file "/v2/garage?connectivityGenerations=MOD1&connectivityGenerations=MOD2&connectivityGenerations=MOD3&connectivityGenerations=MOD4" "$output" \
-    || fail_json "could not load the MySkoda garage"
-  printf '%s' "$output"
+cmd_connect() {
+  local vin="${1:-}" supplied
+  if [ -z "$vin" ]; then printf '%s' "VIN: " >&2; IFS= read -r vin; fi
+  printf '%s' "Paste MySkoda Public API key: " >&2
+  IFS= read -rs supplied; printf '\n' >&2
+  printf '%s\n' "$supplied" | cmd_configure "$vin"
 }
-cmd_vehicles_no_refresh() { local garage; garage=$(garage_file); jq -c '{ok:true,vehicles:[.vehicles[]?|{vin,name,model:(.specification.model//null)}]}' "$garage"; }
-cmd_vehicles() { refresh_access; cmd_vehicles_no_refresh; }
-serve_cache() { [ -s "$CACHE_FILE" ] || fail_json "$1"; jq -c --arg e "$1" '.+{ok:true,stale:true,error:$e}' "$CACHE_FILE"; }
+
+cmd_logout() {
+  rm -f -- "$API_KEY_FILE" "$VIN_FILE" "$LEGACY_REFRESH_FILE" "$LEGACY_ACCESS_FILE" "$LEGACY_LOGIN_FILE"
+  jq -cn '{ok:true,configured:false}'
+}
 
 cmd_car() {
+  local vin key
   if [ -s "$FIXTURE_FILE" ]; then jq -c '.+{ok:true}' "$FIXTURE_FILE"; return; fi
-  refresh_access
-  local garage vin work info charging range parking positions status maintenance failed="[]"
-  garage=$(garage_file); vin="$VIN"; [ -n "$vin" ] || vin=$(jq -r '.vehicles[0].vin//empty' "$garage")
-  [ -n "$vin" ] || fail_json "no vehicles found"
-  jq -e --arg vin "$vin" 'any(.vehicles[]?;.vin==$vin)' "$garage" >/dev/null || fail_json "configured VIN was not found"
-  work=$(mktemp -d "$CACHE_DIR/read.XXXXXX")
-  info="$work/info.json"; charging="$work/charging.json"; range="$work/range.json"; parking="$work/parking.json"
-  positions="$work/positions.json"; status="$work/status.json"; maintenance="$work/maintenance.json"
-  trap 'rm -rf -- "$work"' RETURN
-
-  api_to_file "/v2/garage/vehicles/$vin?connectivityGenerations=MOD1&connectivityGenerations=MOD2&connectivityGenerations=MOD3&connectivityGenerations=MOD4" "$info" & local a=$!
-  api_to_file "/v1/charging/$vin" "$charging" & local b=$!
-  api_to_file "/v2/vehicle-status/$vin/driving-range" "$range" & local c=$!
-  api_to_file "/v3/maps/positions/vehicles/$vin/parking" "$parking" & local d=$!
-  api_to_file "/v2/vehicle-status/$vin" "$status" & local e=$!
-  api_to_file "/v3/vehicle-maintenance/vehicles/$vin" "$maintenance" & local f=$!
-  wait "$a" || failed=$(printf '%s' "$failed"|jq -c '.+["info"]')
-  wait "$b" || failed=$(printf '%s' "$failed"|jq -c '.+["charging"]')
-  wait "$c" || failed=$(printf '%s' "$failed"|jq -c '.+["range"]')
-  wait "$d" || failed=$(printf '%s' "$failed"|jq -c '.+["parking"]')
-  wait "$e" || failed=$(printf '%s' "$failed"|jq -c '.+["status"]')
-  wait "$f" || failed=$(printf '%s' "$failed"|jq -c '.+["maintenance"]')
-  jq -e 'has("vin")' "$info" >/dev/null 2>&1 || { serve_cache "refresh failed"; return; }
-  if ! jq -e '.parkingPosition.gpsCoordinates' "$parking" >/dev/null 2>&1; then
-    api_to_file "/v1/maps/positions?vin=$vin" "$positions" || failed=$(printf '%s' "$failed"|jq -c '.+["positions"]')
-  else printf '{}\n' > "$positions"; fi
-
-  local reading
-  reading=$(jq -cn --argjson at "$(now)" --arg vin "$vin" --argjson errors "$failed" \
-    --slurpfile info "$info" --slurpfile charging "$charging" --slurpfile range "$range" \
-    --slurpfile parking "$parking" --slurpfile positions "$positions" --slurpfile status "$status" \
-    --slurpfile maintenance "$maintenance" '
-    ($info[0]//{}) as $i|($charging[0]//{}) as $c|($range[0]//{}) as $r|($parking[0]//{}) as $p|
-    ($positions[0]//{}) as $ps|($status[0]//{}) as $s|($maintenance[0]//{}) as $m|
-    ($r.primaryEngineRange//{}) as $primary|($r.secondaryEngineRange//{}) as $secondary|
-    ([$primary,$secondary]|map(objects | select((.engineType//"")|ascii_downcase=="electric"))|first//{}) as $electric|
-    ([$primary,$secondary]|map(objects | select((((.engineType//"")|ascii_downcase)!="electric") and (.engineType!=null)))|first//{}) as $fuel|
-    ([$primary,$secondary]|map(objects | .engineType? | strings | ascii_downcase)) as $engineTypes|
-    ([$engineTypes[]? | select(.=="electric")] | length > 0) as $hasElectric|
-    ([$engineTypes[]? | select(.!="electric")] | length > 0) as $hasCombustion|
-    (if $hasElectric and $hasCombustion then "hybrid" elif $hasElectric then "electric" elif $hasCombustion then "combustion" else "unknown" end) as $powertrain|
-    ($c.status.state//null) as $chargeState|
-    ([(if $s.overall.doors=="OPEN" then "one or more doors" else empty end),(if $s.overall.windows=="OPEN" then "one or more windows" else empty end),(if $s.detail.trunk=="OPEN" then "boot" else empty end),(if $s.detail.bonnet=="OPEN" then "bonnet" else empty end),(if $s.detail.sunroof=="OPEN" then "sunroof" else empty end)]) as $open|
-    ([$c.carCapturedTimestamp,$r.carCapturedTimestamp,$p.carCapturedTimestamp,$ps.carCapturedTimestamp,$s.carCapturedTimestamp,$m.carCapturedTimestamp]|map(select(.!=null))|sort|last//null) as $captured|
-    {ok:true,at:$at,captured_at:$captured,vin:$vin,name:($i.name//$i.specification.title//"My Skoda"),model:($i.specification.model//null),model_year:($i.specification.modelYear//null),software:($i.softwareVersion//null),license_plate:($i.licensePlate//null),
-     lat:($p.parkingPosition.gpsCoordinates.latitude//$ps.positions[0].gpsCoordinates.latitude//null),lon:($p.parkingPosition.gpsCoordinates.longitude//$ps.positions[0].gpsCoordinates.longitude//null),address:($p.parkingPosition.formattedAddress//([$ps.positions[0].address.street,$ps.positions[0].address.houseNumber,$ps.positions[0].address.city]|map(select(.!=null and .!=""))|join(", "))//null),
-     battery:($c.status.battery.stateOfChargeInPercent//$electric.currentSoCInPercent//null),fuel:($fuel.currentFuelLevelInPercent//null),range_km:($r.totalRangeInKm//(if $c.status.battery.remainingCruisingRangeInMeters==null then null else ($c.status.battery.remainingCruisingRangeInMeters/1000|round) end)),
-     powertrain:$powertrain,
-     charging:(($chargeState//"")|ascii_upcase=="CHARGING"),charging_state:$chargeState,charge_power_kw:($c.status.chargePowerInKw//null),charge_rate_kmh:($c.status.chargingRateInKilometersPerHour//null),remaining_minutes:($c.status.remainingTimeToFullyChargedInMinutes//null),target_charge:($c.settings.targetStateOfChargeInPercent//null),
-     locked:(($s.overall.locked//"")=="YES" or ($s.overall.locked//"")=="LOCKED"),lock_known:(($s.overall.locked//null)!=null and ($s.overall.locked//"")!="UNKNOWN"),doors:($s.overall.doors//null),windows:($s.overall.windows//null),lights:($s.overall.lights//null),trunk:($s.detail.trunk//null),bonnet:($s.detail.bonnet//null),open:$open,odometer_km:($m.maintenanceReport.mileageInKm//null),partial_errors:$errors}') \
-    || { serve_cache "could not understand the vehicle response"; return; }
-  printf '%s\n' "$reading" | write_private "$CACHE_FILE"; printf '%s\n' "$reading"
+  vin=$(configured_vin)
+  [ -n "$vin" ] || fail_json "not configured" "Enter the VIN and an API key created in the MySkoda app."
+  vin=$(printf '%s' "$vin" | tr '[:lower:]' '[:upper:]')
+  validate_vin "$vin"
+  key=$(api_key)
+  if [ -z "$key" ] && { [ -s "$LEGACY_REFRESH_FILE" ] || [ -s "$LEGACY_ACCESS_FILE" ]; }; then
+    fail_json "Public API key required" "The old login cannot be converted. Create an API key in the MySkoda app." "$vin"
+  fi
+  [ -n "$key" ] || fail_json "not configured" "Enter the VIN and an API key created in the MySkoda app." "$vin"
+  fetch_vehicle "$vin" "$key"
 }
 
 cmd_map() {
@@ -229,21 +238,18 @@ fetch_tile() {
 }
 
 usage() { cat <<'EOF'
-myskoda: read one Skoda through the MySkoda API.
+myskoda: read one Skoda through the official MySkoda Public API.
 
-  login                       sign in in the official browser flow
-  install-handler             register the myskoda:// return handler
-  login-url                   start sign-in and return the official login URL as JSON
-  complete-login CALLBACK     finish sign-in with the myskoda:// return address
-  token                       import an existing refresh token
-  logout                      remove local tokens
-  vehicles                    list account vehicles
+  configure VIN               read an API key from stdin, save it and validate the VIN
+  connect [VIN]               configure interactively in a terminal
+  logout                      remove local credentials
   car                         fetch the widget snapshot
   map LAT LON ZOOM WIDTH HEIGHT
 
 Options: --vin VIN, --tile-url URL
+Set MYSKODA_API_KEY and MYSKODA_VIN to use credentials from a secret manager.
 Set MYSKODA_FIXTURE or create ~/.config/omarchy-myskoda/fixture.json for offline UI testing.
 EOF
 }
 while [ $# -gt 0 ]; do case "$1" in --vin) VIN="${2:-}";shift 2;;--tile-url) TILE_URL="${2:-}";shift 2;;-h|--help)usage;exit 0;;*) command="$1";shift;break;;esac;done
-case "${command:-}" in login)[ $# -eq 0 ]||fail_json "login takes no arguments";cmd_login;;install-handler)[ $# -eq 0 ]||fail_json "install-handler takes no arguments";install_redirect_handler;jq -cn '{ok:true}';;login-url)[ $# -eq 0 ]||fail_json "login-url takes no arguments";cmd_login_url;;complete-login)[ $# -eq 1 ]||fail_json "complete-login needs the myskoda return address";cmd_complete_login "$1";;token)[ $# -eq 0 ]||fail_json "token takes no arguments";cmd_token;;logout)cmd_logout;;vehicles)cmd_vehicles;;car)cmd_car;;map)[ $# -eq 5 ]||fail_json "map wants LAT LON ZOOM WIDTH HEIGHT";cmd_map "$@";;*)usage >&2;fail_json "unknown command";;esac
+case "${command:-}" in configure)[ $# -eq 1 ]||fail_json "configure needs a VIN";cmd_configure "$1";;connect)[ $# -le 1 ]||fail_json "connect accepts at most one VIN";cmd_connect "${1:-}";;logout)[ $# -eq 0 ]||fail_json "logout takes no arguments";cmd_logout;;car)[ $# -eq 0 ]||fail_json "car takes no arguments";cmd_car;;map)[ $# -eq 5 ]||fail_json "map wants LAT LON ZOOM WIDTH HEIGHT";cmd_map "$@";;*)usage >&2;fail_json "unknown command";;esac
