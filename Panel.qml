@@ -34,13 +34,7 @@ Panel {
   readonly property string effectiveMapStyle:
     mapStyle === "Auto" ? (lightTheme ? "Light" : "Dark") : mapStyle
   readonly property bool lightMap: effectiveMapStyle !== "Dark"
-  readonly property string tileUrl: {
-    if (effectiveMapStyle === "Light")
-      return "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-    if (effectiveMapStyle === "OpenStreetMap")
-      return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-    return "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
-  }
+  readonly property string tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
   function command(args) {
     var base = [root.script, "--tile-url", root.tileUrl]
@@ -173,7 +167,10 @@ Panel {
   onLatChanged: planMap()
   onLonChanged: planMap()
   onOpenedChanged: {
-    if (!opened) return
+    if (!opened) {
+      apiKeyField.revealed = false
+      return
+    }
     planMap()
   }
 
@@ -332,13 +329,13 @@ Panel {
     }
   }
 
-  PopupCard {
+  KeyboardPanel {
     id: popup
     anchorItem: button
     bar: root.bar
     owner: root
     open: root.opened
-    triggerMode: "click"
+    focusTarget: root.hasReading ? content : vinField
     contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
     contentHeight: popup.fittedContentHeight(content.implicitHeight)
 
@@ -346,6 +343,7 @@ Panel {
       id: content
       anchors.fill: parent
       spacing: Style.space(10)
+      Keys.onEscapePressed: root.close()
 
       Item {
         width: parent.width
@@ -418,7 +416,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Create an API key in the MyŠkoda app, select this vehicle, then paste the key below. The key is sent directly to the official public API."
+          text: "Create an API key in the MyŠkoda app, select your vehicle, then paste the key below. The key is sent directly to the official public API."
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           font.family: root.fontFamily
@@ -457,13 +455,32 @@ Panel {
 
         TextField {
           id: apiKeyField
+          property bool revealed: false
           width: parent.width
           enabled: !connectProc.running
           placeholderText: "Paste MyŠkoda API key"
-          echoMode: TextInput.Password
+          echoMode: revealed ? TextInput.Normal : TextInput.Password
+          rightPadding: revealKeyButton.width + Style.space(12)
+          onTextChanged: if (text === "") revealed = false
           inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
           foreground: root.foreground
           font.family: root.fontFamily
+          PanelActionButton {
+            id: revealKeyButton
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: apiKeyField.revealed ? "󰈉" : "󰈈"
+            tooltipText: apiKeyField.revealed ? "Hide API key" : "Show API key"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            focusable: true
+            Accessible.name: tooltipText
+            onClicked: {
+              apiKeyField.revealed = !apiKeyField.revealed
+              apiKeyField.forceActiveFocus()
+            }
+          }
           Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
               root.connect()
@@ -744,7 +761,7 @@ Panel {
       Text {
         width: parent.width
         visible: root.keyExpiringSoon
-        text: "The MyŠkoda API key expires on " + root.keyExpiry(root.reading.api_key_expires_at)
+        text: "The MyŠkoda API key expires on " + root.keyExpiry((root.reading || {}).api_key_expires_at)
           + ". Renew it in the app, then sign out and connect the new key."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap

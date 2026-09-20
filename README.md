@@ -7,32 +7,33 @@ location, address, battery or fuel level, remaining range, charging status,
 lock state, odometer, license plate, and any open doors, windows, boot, or
 bonnet.
 
+<img src="preview.png" alt="MySkoda vehicle panel in Omarchy, with location and license plate hidden" width="390">
+
+Preview edited to hide location and license plate.
+
 The helper talks directly to the supported public API. It uses an API key
 created in the MyŠkoda app and does not imitate the mobile app login flow. Its
 only dependencies are `curl`, `jq`, `awk`, and `openssl`, which are present in
 Omarchy.
 
-## Test on an Omarchy machine
+## Install
 
-The repository is currently private, so authenticate the GitHub CLI first and
-clone it locally:
-
-```sh
-gh auth login
-gh repo clone ricardojrgpimentel/omarchy-myskoda
-cd omarchy-myskoda
-```
-
-Run the offline checks and validate the plugin before installing it:
+Requires Omarchy with the Quattro shell and plugin support, plus a MyŠkoda
+Public API key for a supported vehicle.
 
 ```sh
-tests/test.sh
-omarchy plugin validate .
-omarchy plugin add "$PWD" --enable
+omarchy plugin add https://github.com/ricardojrgpimentel/omarchy-myskoda.git --enable
 ```
 
-The widget defaults to the right side of the bar. Move it later with
-`omarchy bar move` or through the bar settings.
+The widget defaults to the right side of the bar. Click the car icon to open
+the vehicle panel. Move the widget through the bar settings or with:
+
+```sh
+omarchy bar move community.myskoda --section right
+```
+
+Installation does not require root access or a custom installer. Account
+configuration is stored separately from the plugin files.
 
 ### Test the interface without an account
 
@@ -101,9 +102,6 @@ rm -rf ~/.config/omarchy-myskoda
 rm -rf ~/.cache/omarchy-myskoda
 ```
 
-After this repository becomes public, installation directly from its Git URL
-will also be possible.
-
 ## Authentication details
 
 Every vehicle request sends the key in the `X-API-Key` header to
@@ -124,7 +122,8 @@ The API key is stored with mode `0600` under
 `~/.config/omarchy-myskoda/`. It is never returned to QML, printed in JSON, or
 passed to `curl` as a command-line argument.
 
-The map uses cached CARTO/OpenStreetMap tiles. It reveals the viewed map area
+The map uses cached OpenStreetMap tiles without a map API key. Dark mode
+is applied locally to the same tiles. It reveals the viewed map area
 to that tile provider, but not the car identity. The street address comes from
 MyŠkoda itself; the plugin does not send coordinates to a geocoder.
 
@@ -143,11 +142,28 @@ Sign out locally with:
 ~/.config/omarchy/plugins/community.myskoda/bin/myskoda logout
 ```
 
+## Development
+
+Clone the repository and run the offline checks before installing a local copy:
+
+```sh
+git clone https://github.com/ricardojrgpimentel/omarchy-myskoda.git
+cd omarchy-myskoda
+tests/test.sh
+omarchy plugin validate .
+qmllint -I /usr/share/omarchy/shell Panel.qml MapView.qml
+omarchy plugin add "$PWD" --enable
+```
+
+The offline checks cover electric, hybrid, and combustion API fixtures,
+credential permissions, expired keys, rate limiting, and local sign-out.
+They do not contact a real vehicle. Live behavior depends on the vehicle and
+the data exposed by its MyŠkoda Public API key.
+
 ## Status
 
 This is an early, unofficial integration and is not affiliated with or endorsed
-by Škoda Auto. Live-account validation is still required on an Omarchy machine
-with a user-created Public API key.
+by Škoda Auto.
 
 ## Credits
 

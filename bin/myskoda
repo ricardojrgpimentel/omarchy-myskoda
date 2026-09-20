@@ -13,7 +13,7 @@ LEGACY_LOGIN_FILE="$CONFIG_DIR/login-session.json"
 CACHE_FILE="$CACHE_DIR/last-reading.json"
 FIXTURE_FILE="${MYSKODA_FIXTURE:-$CONFIG_DIR/fixture.json}"
 MAP_UA="omarchy-myskoda/0.2 (read-only desktop widget)"
-TILE_URL="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+TILE_URL="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 VIN=""
 
 ( umask 077; mkdir -p "$CONFIG_DIR" "$CACHE_DIR/tiles" )
@@ -229,7 +229,7 @@ cmd_map() {
   plan=$(awk -v lat="$lat" -v lon="$lon" -v z="$zoom" -v w="$width" -v h="$height" 'BEGIN{pi=3.14159265358979;s=256;n=2^z;r=lat*pi/180;fx=(lon+180)/360*n;fy=(1-log((sin(r)/cos(r))+(1/cos(r)))/pi)/2*n;cx=fx*s;cy=fy*s;l=cx-w/2;t=cy-h/2;x0=int(l/s);if(l<0&&l!=x0*s)x0--;y0=int(t/s);if(t<0&&t!=y0*s)y0--;x1=int((l+w-1)/s);if(l+w-1<0)x1--;y1=int((t+h-1)/s);if(t+h-1<0)y1--;printf "car %d %d\n",int(w/2+.5),int(h/2+.5);for(y=y0;y<=y1;y++)for(x=x0;x<=x1;x++){if(y<0||y>=n)continue;wx=x%n;if(wx<0)wx+=n;printf "tile %d %d %d %d\n",wx,y,int(x*s-l+.5),int(y*s-t+.5)}}')
   car_x=$(printf '%s' "$plan"|awk '/^car/{print $2}'); car_y=$(printf '%s' "$plan"|awk '/^car/{print $3}')
   while read -r _ tx ty px py; do [ -n "${tx:-}" ] || continue; local path; path=$(fetch_tile "$zoom" "$tx" "$ty") || continue; tiles=$(printf '%s' "$tiles"|jq -c --arg p "$path" --argjson x "$px" --argjson y "$py" '.+[{path:$p,x:$x,y:$y}]'); done < <(printf '%s' "$plan"|awk '/^tile/')
-  jq -cn --argjson tiles "$tiles" --argjson w "$width" --argjson h "$height" --argjson x "${car_x:-0}" --argjson y "${car_y:-0}" --argjson z "$zoom" '{ok:true,width:$w,height:$h,zoom:$z,tileSize:256,carX:$x,carY:$y,tiles:$tiles,attribution:"© OpenStreetMap contributors © CARTO"}'
+  jq -cn --argjson tiles "$tiles" --argjson w "$width" --argjson h "$height" --argjson x "${car_x:-0}" --argjson y "${car_y:-0}" --argjson z "$zoom" '{ok:true,width:$w,height:$h,zoom:$z,tileSize:256,carX:$x,carY:$y,tiles:$tiles,attribution:"© OpenStreetMap contributors"}'
 }
 fetch_tile() {
   local z="$1" x="$2" y="$3" fp dir path url; fp=$(printf '%s' "$TILE_URL"|openssl dgst -sha256|awk '{print substr($NF,1,10)}'); dir="$CACHE_DIR/tiles/$fp/$z/$x"; path="$dir/$y.png"

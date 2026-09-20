@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Effects
+import Qt5Compat.GraphicalEffects
 import qs.Commons
 
 Item {
@@ -21,22 +23,66 @@ Item {
     color: root.lightMap ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.35)
   }
 
-  Repeater {
-    model: root.ready ? root.plan.tiles : []
+  Item {
+    id: tiles
+    anchors.fill: parent
+    visible: root.lightMap
+    layer.enabled: !root.lightMap
 
-    Image {
-      required property var modelData
+    Repeater {
+      model: root.ready ? root.plan.tiles : []
 
-      x: modelData.x
-      y: modelData.y
-      width: root.ready ? root.plan.tileSize : 256
-      height: width
-      source: "file://" + modelData.path
-      asynchronous: true
-      cache: true
-      smooth: false
-      opacity: root.stale ? 0.55 : 1
+      Image {
+        required property var modelData
+
+        x: modelData.x
+        y: modelData.y
+        width: root.ready ? root.plan.tileSize : 256
+        height: width
+        source: "file://" + modelData.path
+        asynchronous: true
+        cache: true
+        smooth: false
+        opacity: root.stale ? 0.55 : 1
+      }
     }
+  }
+
+  // Invert and rotate hue to retain blue water and green parks in dark mode.
+  Rectangle {
+    id: white
+    anchors.fill: tiles
+    color: "white"
+    visible: false
+    layer.enabled: !root.lightMap
+  }
+
+  Blend {
+    id: inverted
+    anchors.fill: tiles
+    source: tiles
+    foregroundSource: white
+    mode: "difference"
+    visible: false
+    layer.enabled: !root.lightMap
+  }
+
+  HueSaturation {
+    id: rotated
+    anchors.fill: tiles
+    source: inverted
+    hue: 0.5
+    visible: false
+    layer.enabled: !root.lightMap
+  }
+
+  MultiEffect {
+    anchors.fill: tiles
+    source: rotated
+    visible: !root.lightMap
+    saturation: -0.85
+    brightness: -0.1
+    contrast: -0.1
   }
 
   Text {
