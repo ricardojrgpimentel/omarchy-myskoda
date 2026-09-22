@@ -43,7 +43,7 @@ lock state, and odometer data from the official MyŠkoda Public API.
 
 Install and remove through `omarchy plugin add` / `omarchy plugin remove`.
 There is no custom installer and no root access is required. Runtime
-dependencies are Bash, curl, jq, awk, openssl, standard system utilities,
+dependencies are Bash, curl, jq, awk, Python 3, standard system utilities,
 and the Omarchy Quattro shell. Users create their own API key in the
 MyŠkoda app. Credentials are stored locally with restrictive permissions;
 removal preserves account data unless the user explicitly deletes it.

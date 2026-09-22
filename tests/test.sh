@@ -106,4 +106,6 @@ test ! -e "$test_dir/config/omarchy-myskoda/vin"
 
 jq -ne '[{engineType:"electric"}, "unexpected"] | map(objects | select((((.engineType//"")|ascii_downcase)!="electric") and (.engineType!=null))) | length == 0' >/dev/null
 
+python3 "$repo_dir/tests/test-transfer.py"
+
 printf '%s\n' "All offline checks passed."

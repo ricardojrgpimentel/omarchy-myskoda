@@ -13,8 +13,8 @@ Preview edited to hide location and license plate.
 
 The helper talks directly to the supported public API. It uses an API key
 created in the MyŠkoda app and does not imitate the mobile app login flow. Its
-only dependencies are `curl`, `jq`, `awk`, and `openssl`, which are present in
-Omarchy.
+runtime dependencies are `curl`, `jq`, `awk`, and `python3`, alongside Bash
+and standard system utilities.
 
 ## Install
 
@@ -127,6 +127,19 @@ is applied locally to the same tiles. It reveals the viewed map area
 to that tile provider, but not the car identity. The street address comes from
 MyŠkoda itself; the plugin does not send coordinates to a geocoder.
 
+Downloads are bounded while reading from curl, including responses without
+`Content-Length`: vehicle JSON is limited to 1 MiB, HTTP headers to 64 KiB,
+and each map tile to 512 KiB. Rejected downloads are discarded before writing
+response files or invoking `jq` or the image renderer. JSON must be a valid
+object; map images must be valid, noninterlaced 256×256 PNGs with bounded
+pixel data. Optional PNG metadata is stripped before caching and rendering.
+Custom tile providers must serve this PNG format.
+
+The tile cache is capped at 32 MiB and 2,048 files. Least recently used tiles
+are removed to make room, with cache updates locked across concurrent
+processes. Existing cached tiles are validated before reuse. Failed vehicle
+refreshes continue to use the last valid cached reading when available.
+
 The integration performs GET requests only. It contains no wake, lock/unlock,
 climate, horn, or charging controls. Unsupported vehicle data is tolerated so
 EV, hybrid, and combustion vehicles can show the data they provide.
@@ -157,6 +170,8 @@ omarchy plugin add "$PWD" --enable
 
 The offline checks cover electric, hybrid, and combustion API fixtures,
 credential permissions, expired keys, rate limiting, and local sign-out.
+Local HTTP tests also cover oversized and malformed responses, chunked and
+EOF-delimited downloads, PNG validation, and concurrent cache eviction.
 They do not contact a real vehicle. Live behavior depends on the vehicle and
 the data exposed by its MyŠkoda Public API key.
 

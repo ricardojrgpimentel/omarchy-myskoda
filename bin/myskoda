@@ -12,7 +12,7 @@ LEGACY_ACCESS_FILE="$CONFIG_DIR/access-token"
 LEGACY_LOGIN_FILE="$CONFIG_DIR/login-session.json"
 CACHE_FILE="$CACHE_DIR/last-reading.json"
 FIXTURE_FILE="${MYSKODA_FIXTURE:-$CONFIG_DIR/fixture.json}"
-MAP_UA="omarchy-myskoda/0.2 (read-only desktop widget)"
+TRANSFER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/myskoda-transfer.py"
 TILE_URL="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 VIN=""
 
@@ -22,7 +22,7 @@ now() { date +%s; }
 write_private() { local p="$1" t="$1.part.$$"; ( umask 077; cat > "$t" ); chmod 600 "$t"; mv -f "$t" "$p"; }
 fail_json() { jq -cn --arg e "$1" --arg h "${2:-}" --arg v "${3:-}" '{ok:false,error:$e}+if $h=="" then {} else {hint:$h} end+if $v=="" then {} else {vin:$v} end'; exit 0; }
 need() { command -v "$1" >/dev/null 2>&1 || fail_json "missing dependency: $1"; }
-for dep in curl jq awk openssl; do need "$dep"; done
+for dep in curl jq awk python3; do need "$dep"; done
 
 api_key() {
   if [ -n "${MYSKODA_API_KEY:-}" ]; then printf '%s' "$MYSKODA_API_KEY"
@@ -56,28 +56,15 @@ header_value() {
 }
 
 request_vehicle() {
-  local vin="$1" key="$2" body="$3" headers="$4" temporary="$3.part.$$" status
-  if [ -n "${MYSKODA_API_FIXTURE:-}" ]; then
-    cp "$MYSKODA_API_FIXTURE" "$body"
-    if [ -n "${MYSKODA_API_HEADERS_FIXTURE:-}" ]; then cp "$MYSKODA_API_HEADERS_FIXTURE" "$headers"
-    else : > "$headers"; fi
-    printf '%s' "${MYSKODA_API_STATUS:-200}"
-    return
-  fi
-  if ! status=$(printf 'X-API-Key: %s\n' "$key" | curl -sS --max-time 45 \
-      --header @- --header 'Accept: application/json' --dump-header "$headers" \
-      --output "$temporary" --write-out '%{http_code}' \
-      "$API_BASE/api/v1/vehicles/$vin?include=info,status,fuelStatus,odometer,parkingPosition,charging" 2>/dev/null); then
-    rm -f -- "$temporary"
-    return 1
-  fi
-  mv -f "$temporary" "$body"
-  printf '%s' "$status"
+  local vin="$1" key="$2" body="$3" headers="$4"
+  printf 'X-API-Key: %s\n' "$key" | python3 "$TRANSFER" vehicle \
+    "$API_BASE/api/v1/vehicles/$vin?include=info,status,fuelStatus,odometer,parkingPosition,charging" \
+    "$body" "$headers" 2>/dev/null
 }
 
 serve_cache() {
   local error="$1" hint="${2:-}" vin="${3:-}" retry_after="${4:-}"
-  if [ -s "$CACHE_FILE" ] && { [ -z "$vin" ] || jq -e --arg vin "$vin" '.vin==$vin' "$CACHE_FILE" >/dev/null 2>&1; }; then
+  if [ -s "$CACHE_FILE" ] && python3 "$TRANSFER" json "$CACHE_FILE" 2>/dev/null && { [ -z "$vin" ] || jq -e --arg vin "$vin" '.vin==$vin' "$CACHE_FILE" >/dev/null 2>&1; }; then
     jq -c --arg e "$error" --arg h "$hint" --arg retry "$retry_after" '
       .+{ok:true,stale:true,error:$e}
       +if $h=="" then {} else {hint:$h} end
@@ -210,7 +197,7 @@ cmd_logout() {
 
 cmd_car() {
   local vin key
-  if [ -s "$FIXTURE_FILE" ]; then jq -c '.+{ok:true}' "$FIXTURE_FILE"; return; fi
+  if [ -s "$FIXTURE_FILE" ]; then python3 "$TRANSFER" json "$FIXTURE_FILE" 2>/dev/null || fail_json "invalid fixture"; jq -c '.+{ok:true}' "$FIXTURE_FILE"; return; fi
   vin=$(configured_vin)
   [ -n "$vin" ] || fail_json "not configured" "Enter the VIN and an API key created in the MySkoda app."
   vin=$(printf '%s' "$vin" | tr '[:lower:]' '[:upper:]')
@@ -226,15 +213,20 @@ cmd_car() {
 cmd_map() {
   local lat="$1" lon="$2" zoom="$3" width="$4" height="$5" plan car_x car_y tiles="[]"
   case "$lat$lon$zoom$width$height" in *[!0-9.\-]*) fail_json "map wants numbers";; esac
+  awk -v lat="$lat" -v lon="$lon" -v z="$zoom" -v w="$width" -v h="$height" 'BEGIN {
+    exit !(lat ~ /^-?[0-9]+([.][0-9]+)?$/ && lon ~ /^-?[0-9]+([.][0-9]+)?$/ &&
+           z ~ /^[0-9]+$/ && w ~ /^[0-9]+$/ && h ~ /^[0-9]+$/ &&
+           lat >= -85.05112878 && lat <= 85.05112878 && lon >= -180 && lon <= 180 &&
+           z >= 0 && z <= 19 && z == int(z) && w >= 1 && w <= 1024 && w == int(w) &&
+           h >= 1 && h <= 1024 && h == int(h))
+  }' || fail_json "map arguments out of range"
   plan=$(awk -v lat="$lat" -v lon="$lon" -v z="$zoom" -v w="$width" -v h="$height" 'BEGIN{pi=3.14159265358979;s=256;n=2^z;r=lat*pi/180;fx=(lon+180)/360*n;fy=(1-log((sin(r)/cos(r))+(1/cos(r)))/pi)/2*n;cx=fx*s;cy=fy*s;l=cx-w/2;t=cy-h/2;x0=int(l/s);if(l<0&&l!=x0*s)x0--;y0=int(t/s);if(t<0&&t!=y0*s)y0--;x1=int((l+w-1)/s);if(l+w-1<0)x1--;y1=int((t+h-1)/s);if(t+h-1<0)y1--;printf "car %d %d\n",int(w/2+.5),int(h/2+.5);for(y=y0;y<=y1;y++)for(x=x0;x<=x1;x++){if(y<0||y>=n)continue;wx=x%n;if(wx<0)wx+=n;printf "tile %d %d %d %d\n",wx,y,int(x*s-l+.5),int(y*s-t+.5)}}')
   car_x=$(printf '%s' "$plan"|awk '/^car/{print $2}'); car_y=$(printf '%s' "$plan"|awk '/^car/{print $3}')
   while read -r _ tx ty px py; do [ -n "${tx:-}" ] || continue; local path; path=$(fetch_tile "$zoom" "$tx" "$ty") || continue; tiles=$(printf '%s' "$tiles"|jq -c --arg p "$path" --argjson x "$px" --argjson y "$py" '.+[{path:$p,x:$x,y:$y}]'); done < <(printf '%s' "$plan"|awk '/^tile/')
   jq -cn --argjson tiles "$tiles" --argjson w "$width" --argjson h "$height" --argjson x "${car_x:-0}" --argjson y "${car_y:-0}" --argjson z "$zoom" '{ok:true,width:$w,height:$h,zoom:$z,tileSize:256,carX:$x,carY:$y,tiles:$tiles,attribution:"© OpenStreetMap contributors"}'
 }
 fetch_tile() {
-  local z="$1" x="$2" y="$3" fp dir path url; fp=$(printf '%s' "$TILE_URL"|openssl dgst -sha256|awk '{print substr($NF,1,10)}'); dir="$CACHE_DIR/tiles/$fp/$z/$x"; path="$dir/$y.png"
-  [ -s "$path" ] && { printf '%s' "$path"; return; }; (umask 077; mkdir -p "$dir"); url="${TILE_URL//\{z\}/$z}"; url="${url//\{x\}/$x}"; url="${url//\{y\}/$y}"
-  if curl -sS -f --max-time 20 -A "$MAP_UA" -o "$path.part" "$url" 2>/dev/null && [ -s "$path.part" ]; then mv -f "$path.part" "$path"; printf '%s' "$path"; else rm -f -- "$path.part"; return 1; fi
+  python3 "$TRANSFER" tile "$CACHE_DIR" "$TILE_URL" "$1" "$2" "$3" 2>/dev/null
 }
 
 usage() { cat <<'EOF'
